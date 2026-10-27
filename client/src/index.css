@@ -1,1 +1,19 @@
 @import "tailwindcss";
+
+/* Browser surfaces carry the design too (craft floor): selection, focus,
+   caret and scrollbars use the page palette, not browser defaults. */
+::selection {
+  background-color: #f59e0b;
+  color: #1c1917;
+}
+
+:focus-visible {
+  outline: 2px solid #b45309;
+  outline-offset: 2px;
+}
+
+input,
+select,
+textarea {
+  caret-color: #b45309;
+}
