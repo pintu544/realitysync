@@ -16,7 +16,7 @@ Single service. `client/` (React + Vite + Tailwind) uploads media and renders th
 - `GET /api/inventory/:shelfId` — expected inventory record.
 - `POST /api/audits/:id/approve` — body `{ approvedQty }`; validates version, updates inventory + audit event atomically.
 - `POST /api/audits/:id/reject` — body `{ reason }`; records rejection event.
-- `GET /api/health` — `{ ok, provider: "meta", llmConfigured, metaConfigured, envWarning }` (same honesty shape as livedocs-meta).
+- `GET /api/health` — `{ ok, provider: "meta", llmConfigured, metaConfigured, envWarning }` (same honesty shape as livedocs-meta). **Semantics (QA W2, pinned): `ok` is process health only; consumers MUST check `llmConfigured`/`metaConfigured`, not `ok`, to judge Meta readiness** — with all env vars missing, `ok` is still true and only the configured flags tell the truth.
 
 ## Key decisions
 - Deterministic counts, LLM explanations: the backend counts, Muse Spark only explains — so a wrong model sentence can never corrupt a number.
