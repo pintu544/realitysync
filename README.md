@@ -6,7 +6,7 @@ Meta Global AI Developer Hackathon — Indie Dev Track, "Build for Your World".
 
 ## Status
 
-Slice 2 done (Postgres/pg-mem DB, migrations, fixtures, upload UI + scan history). Slice 3 next: SAM masks + count validation. See `spec/` for the contract: `GRILL.md`, `SPEC.md`, `DESIGN.md`, `TASKS.md`, `research.md`.
+Slice 3 done (SAM 3.1 wired to scans with async analysis, numbered overlays, coverage full/partial/unknown → needs_review, vertical-split merge, validated on 8 synthetic cases in `spec/eval-s3.md` — including the documented blind spot that SAM silently missing flat boxes can still read `full`). Slice 4 next: video tracking (photo fallback decision point). See `spec/` for the contract: `GRILL.md`, `SPEC.md`, `DESIGN.md`, `TASKS.md`, `research.md`.
 
 ## Layout
 

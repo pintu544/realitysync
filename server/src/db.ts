@@ -41,6 +41,16 @@ const MIGRATIONS: string[] = [
     details JSONB,
     created_at TIMESTAMPTZ DEFAULT NOW()
   )`,
+  `CREATE TABLE IF NOT EXISTS scan_detections (
+    scan_id UUID PRIMARY KEY REFERENCES scans(id),
+    boxes JSONB,
+    mask_count INTEGER,
+    latency_ms INTEGER,
+    error TEXT,
+    analyzed_at TIMESTAMPTZ DEFAULT NOW(),
+    raw_box_count INTEGER
+  )`,
+  `ALTER TABLE scan_detections ADD COLUMN IF NOT EXISTS raw_box_count INTEGER`,
 ];
 
 let db: Db | null = null;

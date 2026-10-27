@@ -1,0 +1,8 @@
+{
+  "eval-3.png": 3,
+  "eval-5.png": 5,
+  "eval-8.png": 8,
+  "eval-occluded.png": "5 physical, 1 edge-clipped + 1 heavily occluded -> count uncertain",
+  "eval-empty.png": 0,
+  "eval-3.jpg": 3
+}

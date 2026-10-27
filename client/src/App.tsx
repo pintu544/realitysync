@@ -8,6 +8,23 @@ interface InventoryRow {
   version: number;
 }
 
+interface DetectionBox {
+  objectId: number | string;
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+interface Detections {
+  boxes: DetectionBox[] | null;
+  mask_count: number | null;
+  latency_ms: number | null;
+  error: string | null;
+  analyzed_at: string | null;
+  raw_box_count: number | null;
+}
+
 interface ScanRow {
   id: string;
   media_url: string;
@@ -18,6 +35,8 @@ interface ScanRow {
   shelf_id: string;
   sku: string;
   expected_qty: number;
+  detections: Detections | null;
+  needs_review: boolean;
 }
 
 async function fetchJson<T>(url: string): Promise<T> {
@@ -32,6 +51,85 @@ async function fetchJson<T>(url: string): Promise<T> {
 function formatTime(iso: string): string {
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
+}
+
+// Renders a scan image with SAM detection boxes drawn over it. SAM boxes
+// are absolute pixels in the ORIGINAL image, so the overlay is positioned
+// from the image's displayed rect (object-contain letterboxing accounted
+// for) — never from the element box alone, which would drift whenever the
+// rendered image does not fill its box exactly.
+function ScanMedia({ scan }: { scan: ScanRow }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const imgRef = useRef<HTMLImageElement>(null);
+  const [rect, setRect] = useState<{ x: number; y: number; w: number; h: number; scale: number } | null>(null);
+
+  const updateRect = useCallback(() => {
+    const img = imgRef.current;
+    const cont = containerRef.current;
+    if (!img || !cont || !img.naturalWidth || !img.naturalHeight) return;
+    const box = img.getBoundingClientRect();
+    const contBox = cont.getBoundingClientRect();
+    const scale = Math.min(box.width / img.naturalWidth, box.height / img.naturalHeight);
+    const dw = img.naturalWidth * scale;
+    const dh = img.naturalHeight * scale;
+    setRect({
+      x: box.left - contBox.left + (box.width - dw) / 2,
+      y: box.top - contBox.top + (box.height - dh) / 2,
+      w: dw,
+      h: dh,
+      scale,
+    });
+  }, []);
+
+  useEffect(() => {
+    setRect(null);
+    updateRect();
+    window.addEventListener("resize", updateRect);
+    return () => window.removeEventListener("resize", updateRect);
+  }, [updateRect, scan.id, scan.media_url]);
+
+  if (scan.media_url.match(/\.mp4$/i)) {
+    return (
+      <video src={scan.media_url} controls className="max-h-80 w-full bg-slate-200 object-contain" />
+    );
+  }
+
+  const boxes = scan.status === "analyzed" ? (scan.detections?.boxes ?? []) : [];
+  return (
+    <div ref={containerRef} className="relative w-full">
+      <img
+        ref={imgRef}
+        src={scan.media_url}
+        alt={`Shelf scan ${scan.shelf_id}`}
+        onLoad={updateRect}
+        className="max-h-80 w-full bg-slate-200 object-contain"
+      />
+      {rect && boxes.length > 0 && (
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute"
+          style={{ left: rect.x, top: rect.y, width: rect.w, height: rect.h }}
+        >
+          {boxes.map((b, i) => (
+            <div
+              key={`${b.objectId}-${i}`}
+              className="absolute border-[3px] border-amber-500"
+              style={{
+                left: b.left * rect.scale,
+                top: b.top * rect.scale,
+                width: (b.right - b.left) * rect.scale,
+                height: (b.bottom - b.top) * rect.scale,
+              }}
+            >
+              <span className="absolute left-1 top-1 bg-amber-400 px-1.5 py-0.5 text-xs font-bold text-slate-900">
+                {i + 1}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default function App() {
@@ -62,6 +160,33 @@ export default function App() {
   }, [refresh]);
 
   const selected = scans.find((s) => s.id === selectedId) ?? scans[0] ?? null;
+
+  // Poll an image scan while it is pending: analysis runs in the
+  // background on the server, and the row updates itself when done.
+  // Video scans are skipped — they stay pending until Slice 4.
+  useEffect(() => {
+    if (!selected || selected.status !== "pending") return;
+    if (selected.media_url.match(/\.mp4$/i)) return;
+    let stopped = false;
+    const started = Date.now();
+    const tick = async () => {
+      if (stopped || Date.now() - started > 90000) return;
+      try {
+        const detail = await fetchJson<ScanRow>(`/api/scans/${selected.id}`);
+        setScans((prev) => prev.map((s) => (s.id === detail.id ? detail : s)));
+        if (detail.status !== "pending") stopped = true;
+      } catch {
+        // Keep polling until the timeout; a transient failure is not a
+        // scan failure.
+      }
+    };
+    const timer = setInterval(tick, 2000);
+    void tick();
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [selected?.id, selected?.status]);
   // Footnote source: the selected scan's own shelf record, not the upload
   // dropdown (I4) — the two can differ once a scan from another shelf is picked.
   const selectedInventory = inventory.find((i) => i.shelf_id === selected?.shelf_id) ?? null;
@@ -87,7 +212,11 @@ export default function App() {
       const created = (await res.json()) as { scanId: string };
       await refresh();
       setSelectedId(created.scanId);
-      setNotice("Scan created. It stays pending until analysis runs in Slice 3.");
+      setNotice(
+        file.type.startsWith("video/")
+          ? "Scan created. Video analysis arrives with Slice 4; this scan stays pending until then."
+          : "Scan created. Analysis runs in the background — this scan updates automatically when it finishes.",
+      );
       setFile(null);
       if (fileRef.current) fileRef.current.value = "";
     } catch (err: unknown) {
@@ -167,8 +296,8 @@ export default function App() {
               <section aria-label="Upload and inspect media" className="bg-white p-5 shadow-sm">
                 <h2 className="mb-1 text-lg font-semibold">Scan a shelf</h2>
                 <p className="mb-4 text-sm text-slate-600">
-                  Upload a shelf photo or a 10–15 second video. The scan record is created
-                  immediately; detection and counting arrive with Slice 3.
+                  Upload a shelf photo or a 10–15 second video. Image scans analyze
+                  in the background after upload; video analysis arrives with Slice 4.
                 </p>
                 <form onSubmit={handleUpload} className="space-y-4">
                   <div>
@@ -201,7 +330,7 @@ export default function App() {
                   <button
                     type="submit"
                     disabled={uploading || inventory.length === 0}
-                    className="bg-slate-900 px-5 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
+                    className="bg-slate-900 px-5 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
                   >
                     {uploading ? "Uploading…" : "Create scan"}
                   </button>
@@ -210,14 +339,42 @@ export default function App() {
                 {selected && (
                   <div className="mt-6 border-t border-slate-200 pt-4">
                     <h3 className="mb-2 text-sm font-semibold">Selected scan media</h3>
-                    {selected.media_url.match(/\.(mp4)$/i) ? (
-                      <video src={selected.media_url} controls className="max-h-80 w-full bg-slate-200 object-contain" />
-                    ) : (
-                      <img src={selected.media_url} alt={`Shelf scan ${selected.shelf_id}`} className="max-h-80 w-full bg-slate-200 object-contain" />
-                    )}
+                    <ScanMedia scan={selected} />
                     <p className="mt-2 text-xs text-slate-500">
                       Scan {selected.id} · {formatTime(selected.created_at)}
                     </p>
+                    {selected.status === "analyzed" && (selected.detections?.boxes?.length ?? 0) > 0 && (
+                      <p className="mt-1 text-xs text-slate-600">
+                        Numbered outlines are SAM 3.1 detections on this image — one outline
+                        per visible object counted.
+                      </p>
+                    )}
+                    {selected.status === "failed" && (
+                      <div className="mt-3 border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-900">
+                        Analysis failed: {selected.detections?.error ?? "unknown error"}. No count
+                        was fabricated — retry to run detection again.
+                        <button
+                          type="button"
+                          className="ml-2 font-semibold underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+                          onClick={async () => {
+                            setError(null);
+                            try {
+                              const res = await fetch(`/api/scans/${selected.id}/analyze`, { method: "POST" });
+                              if (!res.ok) {
+                                const body = await res.json().catch(() => ({}));
+                                throw new Error((body as { error?: string }).error ?? `Retry failed (${res.status})`);
+                              }
+                              await refresh();
+                              setNotice("Analysis restarted — this scan updates automatically when it finishes.");
+                            } catch (err: unknown) {
+                              setError(err instanceof Error ? err.message : "Retry failed.");
+                            }
+                          }}
+                        >
+                          Retry analysis
+                        </button>
+                      </div>
+                    )}
                   </div>
                 )}
               </section>
@@ -254,9 +411,49 @@ export default function App() {
                       <dt className="text-slate-600">Status</dt>
                       <dd className="font-medium">{selected.status}</dd>
                     </div>
+                    {selected.detections && (
+                      <>
+                        <div className="flex justify-between gap-4 border-t border-slate-200 pt-2">
+                          <dt className="text-slate-600">Detections</dt>
+                          <dd className="font-medium tabular-nums">
+                            {(selected.detections.boxes?.length ?? 0)} boxes
+                            {selected.detections.mask_count != null && ` · ${selected.detections.mask_count} masks`}
+                          </dd>
+                        </div>
+                        {selected.detections.latency_ms != null && (
+                          <div className="flex justify-between gap-4 border-b border-slate-200 pb-2">
+                            <dt className="text-slate-600">Analysis time</dt>
+                            <dd className="font-medium tabular-nums">
+                              {(selected.detections.latency_ms / 1000).toFixed(1)}s
+                            </dd>
+                          </div>
+                        )}
+                        {selected.detections.raw_box_count != null &&
+                          selected.detections.raw_box_count !== (selected.detections.boxes?.length ?? 0) && (
+                            <p className="text-xs text-slate-500">
+                              Counting note: SAM returned {selected.detections.raw_box_count} raw
+                              segments; {(selected.detections.boxes?.length ?? 0)} remain after
+                              merging vertical tape-line splits.
+                            </p>
+                          )}
+                      </>
+                    )}
                   </dl>
                 ) : (
                   <p className="text-sm text-slate-600">No scans yet. Upload a shelf photo to create the first scan.</p>
+                )}
+                {selected?.needs_review && (
+                  <div role="status" className="mt-4 border border-amber-500 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                    Needs review — coverage is {selected.coverage_status}, so this count is
+                    observed, not confident. Do not correct inventory from this scan; a
+                    recount or a clearer photo is the safe next step.
+                  </div>
+                )}
+                {selected && selected.status === "analyzed" && !selected.needs_review && (
+                  <p className="mt-4 text-sm text-slate-600">
+                    Full coverage — this visible count is confident and ready for the
+                    discrepancy workflow.
+                  </p>
                 )}
                 <h3 className="mb-1 mt-6 text-sm font-semibold">AI investigation</h3>
                 <p className="text-sm text-slate-600">
@@ -288,6 +485,7 @@ export default function App() {
                       <th className="px-3 py-2 font-semibold">Created</th>
                       <th className="px-3 py-2 font-semibold">Status</th>
                       <th className="px-3 py-2 font-semibold">Coverage</th>
+                      <th className="px-3 py-2 font-semibold">Review</th>
                       <th className="px-3 py-2 font-semibold tabular-nums">Visible</th>
                       <th className="px-3 py-2 font-semibold tabular-nums">Expected</th>
                     </tr>
@@ -303,6 +501,7 @@ export default function App() {
                         <td className="px-3 py-2">{formatTime(scan.created_at)}</td>
                         <td className="px-3 py-2">{scan.status}</td>
                         <td className="px-3 py-2">{scan.coverage_status}</td>
+                        <td className="px-3 py-2">{scan.needs_review ? "Needs review" : "—"}</td>
                         <td className="px-3 py-2 tabular-nums">{scan.visible_qty ?? "—"}</td>
                         <td className="px-3 py-2 tabular-nums">{scan.expected_qty}</td>
                       </tr>

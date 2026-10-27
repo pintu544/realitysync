@@ -8,6 +8,7 @@ import express from "express";
 import multer from "multer";
 import { dbBackend, initDb, type Db } from "./db.js";
 import { seedFixtures } from "./seed.js";
+import { runAnalysis } from "./analyze.js";
 
 const app = express();
 app.use(express.json());
@@ -132,9 +133,9 @@ app.get("/api/inventory/:shelfId", async (req, res) => {
   res.json(rows[0]);
 });
 
-// Upload a shelf photo/video and create a scan record. SAM wiring is Slice 3:
-// a scan created here stays `pending` (visible_qty null, coverage `unknown`)
-// until Slice 3 analysis runs.
+// Upload a shelf photo/video and create a scan record. Slice 3: image
+// scans kick off SAM analysis asynchronously (the upload still returns
+// fast); video scans stay pending until Slice 4 video tracking lands.
 //
 // Error paths delete the uploaded file (W3): a rejected upload must never
 // leave an orphan on disk, whatever the failure.
@@ -172,25 +173,83 @@ app.post("/api/scans", upload.single("media"), async (req, res) => {
     return;
   }
   res.status(201).json({ scanId, status: "pending", mediaUrl });
+  // Analysis runs in the background; its outcome lands on the scan row.
+  void runAnalysis(db, scanId);
 });
+
+function withDetections(row: Record<string, unknown>): Record<string, unknown> {
+  let boxes: unknown = row.boxes ?? null;
+  if (typeof boxes === "string") {
+    try {
+      boxes = JSON.parse(boxes);
+    } catch {
+      boxes = null;
+    }
+  }
+  const hasDetections = row.boxes !== null && row.boxes !== undefined;
+  return {
+    ...row,
+    detections: hasDetections
+      ? {
+          boxes,
+          mask_count: row.mask_count ?? null,
+          latency_ms: row.latency_ms ?? null,
+          error: row.analysis_error ?? null,
+          analyzed_at: row.analyzed_at ?? null,
+          raw_box_count: row.raw_box_count ?? null,
+        }
+      : null,
+    needs_review: row.status === "analyzed" && row.coverage_status !== "full",
+  };
+}
 
 app.get("/api/scans", async (_req, res) => {
   const { rows } = await db.query(
-    "SELECT s.*, i.shelf_id, i.sku, i.expected_qty FROM scans s JOIN inventory i ON i.id = s.inventory_id ORDER BY s.created_at DESC",
+    `SELECT s.*, i.shelf_id, i.sku, i.expected_qty,
+       d.boxes, d.mask_count, d.latency_ms, d.error AS analysis_error, d.analyzed_at, d.raw_box_count
+     FROM scans s JOIN inventory i ON i.id = s.inventory_id
+     LEFT JOIN scan_detections d ON d.scan_id = s.id
+     ORDER BY s.created_at DESC`,
   );
-  res.json(rows);
+  res.json(rows.map(withDetections));
 });
 
 app.get("/api/scans/:id", async (req, res) => {
   const { rows } = await db.query(
-    "SELECT s.*, i.shelf_id, i.sku, i.expected_qty FROM scans s JOIN inventory i ON i.id = s.inventory_id WHERE s.id = $1",
+    `SELECT s.*, i.shelf_id, i.sku, i.expected_qty,
+       d.boxes, d.mask_count, d.latency_ms, d.error AS analysis_error, d.analyzed_at, d.raw_box_count
+     FROM scans s JOIN inventory i ON i.id = s.inventory_id
+     LEFT JOIN scan_detections d ON d.scan_id = s.id
+     WHERE s.id = $1`,
     [req.params.id],
   );
   if (rows.length === 0) {
     res.status(404).json({ error: "scan not found" });
     return;
   }
-  res.json(rows[0]);
+  res.json(withDetections(rows[0]));
+});
+
+// Re-run SAM analysis for a pending or failed scan. Analyzed scans and
+// video scans are refused: the former already has evidence, the latter
+// needs Slice 4 video tracking.
+app.post("/api/scans/:id/analyze", async (req, res) => {
+  const { rows } = await db.query("SELECT * FROM scans WHERE id = $1", [req.params.id]);
+  if (rows.length === 0) {
+    res.status(404).json({ error: "scan not found" });
+    return;
+  }
+  const scan = rows[0];
+  if (scan.status === "analyzed") {
+    res.status(409).json({ error: "scan already analyzed" });
+    return;
+  }
+  if (typeof scan.media_url === "string" && scan.media_url.endsWith(".mp4")) {
+    res.status(409).json({ error: "video analysis arrives in Slice 4" });
+    return;
+  }
+  void runAnalysis(db, req.params.id);
+  res.json({ scanId: req.params.id, status: "pending" });
 });
 
 // Error handler (W2): API errors are always JSON, never an HTML stack trace.
