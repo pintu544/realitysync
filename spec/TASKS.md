@@ -3,9 +3,9 @@
 Slices are vertical and demoable. Check a task off only when its acceptance criteria pass (tests + live check). Oct 31 is BLACKOUT (Paytm offline day) — no work that day.
 
 ## Slice 1 — Foundation + SAM probe (Oct 27)
-- [ ] S1.1 Repo + projects: `~/workspace/realitysync/` with `client/` + `server/`, public GitHub repo `pintu544/realitysync`, git identity Pintu Kumar <64580363+pintu544@users.noreply.github.com>. Done means: remote HEAD verified, tree clean, no secrets committed.
-- [ ] S1.2 Meta key/credits verify: transient key read from the Meta goal's `hidden_files/.env` (never printed, stored, or committed); health-style probe confirms Meta API reachability. Done means: HTTP 200 evidence, no key material in any output.
-- [ ] S1.3 One real SAM 3.1 segmentation: one real image (synthetic shelf image acceptable for the probe) → parsed SAM output with count + boxes. Done means: real API response saved as evidence (counts/boxes, no key), OR a clear failure report that stops the build.
+- [x] S1.1 Repo + projects: `~/workspace/realitysync/` with `client/` + `server/`, public GitHub repo `pintu544/realitysync`, git identity Pintu Kumar <64580363+pintu544@users.noreply.github.com>. Done means: remote HEAD verified, tree clean, no secrets committed. — DONE 2026-10-27: remote HEAD fe0c98e (later 2nd commit, see below), tree clean, secret scan clean, repo PUBLIC.
+- [x] S1.2 Meta key/credits verify: transient key read from the Meta goal's `hidden_files/.env` (never printed, stored, or committed); health-style probe confirms Meta API reachability. Done means: HTTP 200 evidence, no key material in any output. — DONE 2026-10-27: GET /v1/models → HTTP 200, sam-3.1 + muse-spark-1.3 listed. Evidence: spec/probe-evidence.md.
+- [x] S1.3 One real SAM 3.1 segmentation: one real image (synthetic shelf image acceptable for the probe) → parsed SAM output with count + boxes. Done means: real API response saved as evidence (counts/boxes, no key), OR a clear failure report that stops the build. — DONE 2026-10-27: outcome completed, 6/6 boxes within ~1px, latency 2007ms. Evidence: spec/probe-evidence.md + spec/probe-shelf.png.
 - [ ] S1.4 QA gate (adversarial, fresh agent): probe evidence + scaffold reviewed; criticals fixed before Slice 2.
 
 ## Slice 2 — Dashboard + simulated ERP (Oct 28)
