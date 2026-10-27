@@ -9,10 +9,13 @@ Single service. `client/` (React + Vite + Tailwind) uploads media and renders th
 - `audit_cases`: id UUID PK, scan_id UUID FK, recommendation JSONB, state TEXT DEFAULT 'needs_review', approved_qty INTEGER, created_at TIMESTAMPTZ DEFAULT NOW().
 - `audit_events`: id UUID PK, case_id UUID FK, action TEXT NOT NULL, details JSONB, created_at TIMESTAMPTZ DEFAULT NOW().
 - Seed fixtures in `fixtures/` (Shelf A-01, SKU BOX-RED, expected 12 — the demo case) with a documented refresh contract.
+- **Dev database decision (Slice 2, documented before coding):** local Postgres is unavailable on the dev VM (no server installed, no Docker). When `DATABASE_URL` is set, the server uses real PostgreSQL via `pg` — this is the production/Azure path and the only path that persists. When `DATABASE_URL` is unset, the server uses `pg-mem` (in-memory, pg-compatible) for **DEV ONLY**: same schema, same migrations, data resets on restart. The pg-mem fallback must never be used in production; production requires `DATABASE_URL`. This keeps Slice 2 demoable without a Postgres server while keeping the schema identical.
 
 ## API contracts
 - `POST /api/scans` — upload media, start analysis → `{ scanId, status }`.
+- `GET /api/scans` — list scans, newest first (Slice 2 addition for scan history).
 - `GET /api/scans/:id` — progress, visible count, masks/evidence, audit case.
+- `GET /api/inventory` — list all inventory records (Slice 2 addition for the inventory view).
 - `GET /api/inventory/:shelfId` — expected inventory record.
 - `POST /api/audits/:id/approve` — body `{ approvedQty }`; validates version, updates inventory + audit event atomically.
 - `POST /api/audits/:id/reject` — body `{ reason }`; records rejection event.

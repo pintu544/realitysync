@@ -1,0 +1,125 @@
+{
+  "probe": "realitysync S1.3 SAM gate (reproducibility re-run)",
+  "runAt": "2026-10-27T02:42:53.553Z",
+  "model": "sam-3.1",
+  "prompt": "cardboard box",
+  "image": "spec/probe-shelf.png",
+  "outcomeStatus": "completed",
+  "latencyMs": 1452,
+  "counts": {
+    "boxRecords": 6,
+    "maskRecords": 6
+  },
+  "boxes": [
+    {
+      "objectId": "0",
+      "bounds": {
+        "left": 960,
+        "top": 190,
+        "right": 1111,
+        "bottom": 371
+      }
+    },
+    {
+      "objectId": "1",
+      "bounds": {
+        "left": 760,
+        "top": 210,
+        "right": 920,
+        "bottom": 370
+      }
+    },
+    {
+      "objectId": "2",
+      "bounds": {
+        "left": 301,
+        "top": 431,
+        "right": 510,
+        "bottom": 670
+      }
+    },
+    {
+      "objectId": "3",
+      "bounds": {
+        "left": 101,
+        "top": 181,
+        "right": 290,
+        "bottom": 370
+      }
+    },
+    {
+      "objectId": "4",
+      "bounds": {
+        "left": 321,
+        "top": 201,
+        "right": 491,
+        "bottom": 370
+      }
+    },
+    {
+      "objectId": "5",
+      "bounds": {
+        "left": 521,
+        "top": 171,
+        "right": 720,
+        "bottom": 370
+      }
+    }
+  ],
+  "masks": [
+    {
+      "objectId": "0",
+      "bounds": {
+        "left": 960,
+        "top": 190,
+        "right": 1111,
+        "bottom": 371
+      }
+    },
+    {
+      "objectId": "1",
+      "bounds": {
+        "left": 760,
+        "top": 210,
+        "right": 920,
+        "bottom": 370
+      }
+    },
+    {
+      "objectId": "2",
+      "bounds": {
+        "left": 301,
+        "top": 431,
+        "right": 510,
+        "bottom": 670
+      }
+    },
+    {
+      "objectId": "3",
+      "bounds": {
+        "left": 101,
+        "top": 181,
+        "right": 290,
+        "bottom": 370
+      }
+    },
+    {
+      "objectId": "4",
+      "bounds": {
+        "left": 321,
+        "top": 201,
+        "right": 491,
+        "bottom": 370
+      }
+    },
+    {
+      "objectId": "5",
+      "bounds": {
+        "left": 521,
+        "top": 171,
+        "right": 720,
+        "bottom": 370
+      }
+    }
+  ]
+}
