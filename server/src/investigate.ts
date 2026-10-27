@@ -185,6 +185,13 @@ async function ensureAuditCaseInner(db: Db, scanId: string): Promise<AuditCase |
     const existing = await db.query("SELECT * FROM audit_cases WHERE scan_id = $1", [scanId]);
     const existingCase = existing.rows.length > 0 ? parseAuditCase(existing.rows[0]) : null;
     const existingRec = (existingCase?.recommendation ?? {}) as Record<string, unknown>;
+    // Slice 7 S7.0: a decided case is immutable. Its investigation record
+    // must not mutate post-decision — no re-bought Spark call, no new
+    // event, no recommendation rewrite — so return it unchanged here,
+    // before any investigation runs or any UPDATE executes.
+    if (existingCase && (existingCase.state === "approved" || existingCase.state === "rejected")) {
+      return existingCase;
+    }
     // Idempotent: an existing investigation is never re-bought.
     if (existingCase && existingRec.investigation) return existingCase;
 

@@ -244,6 +244,14 @@ export default function App() {
   const [deciding, setDeciding] = useState(false);
   const [metrics, setMetrics] = useState<MetricsView | null>(null);
 
+  // Slice 7 S7.0: eval cases that read confident (full coverage, not
+  // needs_review) on uncertain truth are confident misses excluded from
+  // the numeric-truth Confident-wrong count — derived from the run data,
+  // never hardcoded, so the caveat below names exactly what the table shows.
+  const uncertainConfident = (metrics?.evalRun?.cases ?? []).filter(
+    (c) => c.uncertain && c.coverage === "full" && c.needs_review === false,
+  );
+
   const refresh = useCallback(async () => {
     const [inv, history] = await Promise.all([
       fetchJson<InventoryRow[]>("/api/inventory"),
@@ -750,28 +758,37 @@ export default function App() {
                     <p className="text-slate-600">
                       Investigation unavailable:{" "}
                       {selected.audit_case.recommendation?.investigation_error ?? "unknown error"}.
-                      No explanation was fabricated — the case stays open for review.
+                      No explanation was fabricated —{" "}
+                      {selected.audit_case.state === "needs_review"
+                        ? "the case stays open for review."
+                        : "this decided case keeps its existing record."}
                     </p>
-                    <button
-                      type="button"
-                      className="mt-2 font-semibold underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
-                      onClick={async () => {
-                        setError(null);
-                        try {
-                          const res = await fetch(`/api/scans/${selected.id}/investigate`, { method: "POST" });
-                          if (!res.ok) {
-                            const body = await res.json().catch(() => ({}));
-                            throw new Error((body as { error?: string }).error ?? `Investigation failed (${res.status})`);
+                    {selected.audit_case.state === "needs_review" ? (
+                      <button
+                        type="button"
+                        className="mt-2 font-semibold underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+                        onClick={async () => {
+                          setError(null);
+                          try {
+                            const res = await fetch(`/api/scans/${selected.id}/investigate`, { method: "POST" });
+                            if (!res.ok) {
+                              const body = await res.json().catch(() => ({}));
+                              throw new Error((body as { error?: string }).error ?? `Investigation failed (${res.status})`);
+                            }
+                            await refresh();
+                            setNotice("Investigation updated.");
+                          } catch (err: unknown) {
+                            setError(err instanceof Error ? err.message : "Investigation failed.");
                           }
-                          await refresh();
-                          setNotice("Investigation updated.");
-                        } catch (err: unknown) {
-                          setError(err instanceof Error ? err.message : "Investigation failed.");
-                        }
-                      }}
-                    >
-                      Retry investigation
-                    </button>
+                        }}
+                      >
+                        Retry investigation
+                      </button>
+                    ) : (
+                      <p className="mt-2 text-xs text-slate-500">
+                        This case is already decided, so its investigation record is frozen.
+                      </p>
+                    )}
                   </div>
                 )}
                 {selected?.audit_case && selected.audit_case.state === "needs_review" && (
@@ -989,6 +1006,14 @@ export default function App() {
                       </dd>
                     </div>
                   </dl>
+                  {uncertainConfident.length > 0 && (
+                    <p className="mt-3 border border-amber-500 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                      Caveat: {uncertainConfident.map((c) => c.file).join(", ")} read
+                      confident with full coverage on uncertain truth — a confident
+                      miss excluded from the Confident-wrong (numeric truth) count
+                      above. Do not read that count as “no confident errors”.
+                    </p>
+                  )}
                   <table className="mt-4 w-full border-collapse text-left text-sm">
                     <thead>
                       <tr className="border-b border-slate-300">
@@ -1003,10 +1028,12 @@ export default function App() {
                       {metrics.evalRun.cases.map((c) => {
                         const mismatch =
                           typeof c.truth === "number" && c.visible !== c.truth;
+                        const uncertainConfidentRow =
+                          c.uncertain && c.coverage === "full" && c.needs_review === false;
                         return (
                           <tr
                             key={c.file}
-                            className={`border-b border-slate-200 last:border-0 ${mismatch ? "bg-amber-50" : ""}`}
+                            className={`border-b border-slate-200 last:border-0 ${mismatch || uncertainConfidentRow ? "bg-amber-50" : ""}`}
                           >
                             <td className="px-3 py-2">{c.file}</td>
                             <td className="px-3 py-2 tabular-nums">{c.truth ?? "uncertain"}</td>

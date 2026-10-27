@@ -317,6 +317,8 @@ app.post("/api/scans/:id/analyze", async (req, res) => {
 // Slice 5: re-run the Muse Spark investigation for an analyzed scan whose
 // case has no (or a failed) investigation. Idempotent: a case with an
 // investigation already present is returned unchanged, no second model call.
+// Slice 7 S7.0: a decided case (approved/rejected) is returned unchanged
+// too — its record must not mutate post-decision.
 app.post("/api/scans/:id/investigate", async (req, res) => {
   if (!isUuid(req.params.id)) {
     res.status(400).json({ error: "invalid scan id" });
