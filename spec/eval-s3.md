@@ -77,7 +77,35 @@ REAL photos (still needed from Pintu) is what settles real accuracy.
 Until then, no accuracy number from this page may be quoted as a
 product claim.
 
-## What Slice 3 does and does not guarantee
+## Slice 4 S4.0 re-verification (Slice 3 QA carry-over, 2026-10-27)
+
+- W1 merge symmetry: DESIGN.md rule now checks vertical overlap in [-10, 2]px
+  in either order. Unit checks: reversed-order halves merge (1), 3px overlap
+  does not merge (2), side-by-side never merges (2). Eval re-run (run-eval.mjs):
+  eval-5 → 5 (raw 6), eval-3.jpg → 3 (raw 6), all other fixtures identical to
+  Slice 3 round 2 — no merged-count regression.
+- W3 copy: full-coverage line now reads as what SAM saw in the photo, not
+  proof of stock; DESIGN.md pins the same caveat for Slice 5+ audit wording.
+- W4 in-flight guard: second analyze during an active run → 409
+  "analysis already running" (verified live).
+- W5 retry/refresh: poll-cap banner with Refresh status + Retry analysis
+  buttons added for scans pending past 90s (browser verification with the
+  Slice 4 client check).
+- W6 confidence: `include_confidence: "true"` metadata added; probe image
+  re-run returns 6 boxes with confidences ~0.74–0.75 stored in
+  scan_detections (previously all null).
+- W7 min-size filter: boxes below 0.1% of image area dropped before
+  merging; unit check keeps a 200×200 box and drops a 10×10 sliver on a
+  1200×800 frame; threshold documented in DESIGN.md.
+- I1 unknown API route → JSON 404 (verified live). I2 truncated-PNG scan
+  fails honestly with the Meta decode error, no path leak. I3 initial SELECT
+  wrapped (no unhandled rejection path). I5 partial fixtures added to
+  spec/eval/ground-truth.json (partial + partial-labeled, both 6 physical).
+- Slice 2/3 error paths re-run live: no-file 400, wrong-MIME 415,
+  unknown-shelf 404 with zero orphan files, unknown-scan 404, 26MB 413,
+  spoof .html-as-PNG 415, valid PNG named evil.html saved as .png and
+  served image/png + attachment + nosniff + sandbox, prod-without-
+  DATABASE_URL exits 1, truncated-PNG async failure → failed/unknown.
 
 - DOES: wire SAM into scans asynchronously; number overlays from merged
   boxes; coverage full/partial/unknown per the documented heuristic;

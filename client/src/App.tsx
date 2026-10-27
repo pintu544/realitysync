@@ -90,7 +90,16 @@ function ScanMedia({ scan }: { scan: ScanRow }) {
 
   if (scan.media_url.match(/\.mp4$/i)) {
     return (
-      <video src={scan.media_url} controls className="max-h-80 w-full bg-slate-200 object-contain" />
+      <div>
+        <video src={scan.media_url} controls className="max-h-80 w-full bg-slate-200 object-contain" />
+        {scan.status === "analyzed" && scan.coverage_status === "unknown" && (scan.visible_qty ?? 0) === 0 && (
+          <p className="mt-2 text-xs text-slate-600">
+            No objects were tracked in this video. SAM video tracking needs
+            camera motion — re-record with a slow pan past the shelf instead
+            of a static shot. This is not evidence the shelf is empty.
+          </p>
+        )}
+      </div>
     );
   }
 
@@ -140,6 +149,7 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
+  const [pollTimedOut, setPollTimedOut] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -161,16 +171,25 @@ export default function App() {
 
   const selected = scans.find((s) => s.id === selectedId) ?? scans[0] ?? null;
 
-  // Poll an image scan while it is pending: analysis runs in the
+  // Poll a scan while it is pending: analysis runs in the
   // background on the server, and the row updates itself when done.
-  // Video scans are skipped — they stay pending until Slice 4.
+  // Video scans poll the same way since Slice 4 video tracking.
+  // W5: if the 90s poll cap passes with the scan still pending, stop
+  // silently polling and show the retry/refresh control instead — a
+  // stuck-pending scan must be recoverable from the UI, not just by
+  // reloading the page.
   useEffect(() => {
     if (!selected || selected.status !== "pending") return;
-    if (selected.media_url.match(/\.mp4$/i)) return;
     let stopped = false;
     const started = Date.now();
+    setPollTimedOut(false);
     const tick = async () => {
-      if (stopped || Date.now() - started > 90000) return;
+      if (stopped) return;
+      if (Date.now() - started > 90000) {
+        stopped = true;
+        setPollTimedOut(true);
+        return;
+      }
       try {
         const detail = await fetchJson<ScanRow>(`/api/scans/${selected.id}`);
         setScans((prev) => prev.map((s) => (s.id === detail.id ? detail : s)));
@@ -213,9 +232,7 @@ export default function App() {
       await refresh();
       setSelectedId(created.scanId);
       setNotice(
-        file.type.startsWith("video/")
-          ? "Scan created. Video analysis arrives with Slice 4; this scan stays pending until then."
-          : "Scan created. Analysis runs in the background — this scan updates automatically when it finishes.",
+        "Scan created. Analysis runs in the background — this scan updates automatically when it finishes.",
       );
       setFile(null);
       if (fileRef.current) fileRef.current.value = "";
@@ -296,8 +313,10 @@ export default function App() {
               <section aria-label="Upload and inspect media" className="bg-white p-5 shadow-sm">
                 <h2 className="mb-1 text-lg font-semibold">Scan a shelf</h2>
                 <p className="mb-4 text-sm text-slate-600">
-                  Upload a shelf photo or a 10–15 second video. Image scans analyze
-                  in the background after upload; video analysis arrives with Slice 4.
+                  Upload a shelf photo or a 10–15 second video. Scans analyze
+                  in the background after upload; for video, a slow pan past
+                  the shelf tracks best — a fully static shot can return no
+                  detections at all.
                 </p>
                 <form onSubmit={handleUpload} className="space-y-4">
                   <div>
@@ -365,6 +384,50 @@ export default function App() {
                                 throw new Error((body as { error?: string }).error ?? `Retry failed (${res.status})`);
                               }
                               await refresh();
+                              setNotice("Analysis restarted — this scan updates automatically when it finishes.");
+                            } catch (err: unknown) {
+                              setError(err instanceof Error ? err.message : "Retry failed.");
+                            }
+                          }}
+                        >
+                          Retry analysis
+                        </button>
+                      </div>
+                    )}
+                    {selected.status === "pending" && pollTimedOut && (
+                      <div className="mt-3 border border-amber-500 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                        Still waiting after 90 seconds — this scan may be stuck.
+                        Refresh its status, or retry analysis (a run already in
+                        progress answers 409 instead of double-charging).
+                        <button
+                          type="button"
+                          className="ml-2 font-semibold underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+                          onClick={async () => {
+                            setError(null);
+                            try {
+                              const detail = await fetchJson<ScanRow>(`/api/scans/${selected.id}`);
+                              setScans((prev) => prev.map((s) => (s.id === detail.id ? detail : s)));
+                              if (detail.status !== "pending") setPollTimedOut(false);
+                              else setNotice("Still pending — try retrying analysis.");
+                            } catch (err: unknown) {
+                              setError(err instanceof Error ? err.message : "Refresh failed.");
+                            }
+                          }}
+                        >
+                          Refresh status
+                        </button>
+                        <button
+                          type="button"
+                          className="ml-2 font-semibold underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+                          onClick={async () => {
+                            setError(null);
+                            try {
+                              const res = await fetch(`/api/scans/${selected.id}/analyze`, { method: "POST" });
+                              if (!res.ok) {
+                                const body = await res.json().catch(() => ({}));
+                                throw new Error((body as { error?: string }).error ?? `Retry failed (${res.status})`);
+                              }
+                              setPollTimedOut(false);
                               setNotice("Analysis restarted — this scan updates automatically when it finishes.");
                             } catch (err: unknown) {
                               setError(err instanceof Error ? err.message : "Retry failed.");
@@ -451,8 +514,9 @@ export default function App() {
                 )}
                 {selected && selected.status === "analyzed" && !selected.needs_review && (
                   <p className="mt-4 text-sm text-slate-600">
-                    Full coverage — this visible count is confident and ready for the
-                    discrepancy workflow.
+                    Full coverage — this is what SAM saw in this photo: a visible
+                    count, not proof of stock. A recount or a clearer photo is
+                    still the safe check before any inventory change.
                   </p>
                 )}
                 <h3 className="mb-1 mt-6 text-sm font-semibold">AI investigation</h3>

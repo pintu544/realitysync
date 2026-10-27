@@ -5,8 +5,8 @@
 // The Meta key is read from the environment ONLY (MODEL_API_KEY) and is
 // never printed, logged, stored, or returned by this module.
 import { readFileSync } from "node:fs";
-import OpenAI from "openai";
-import { parseImageStream, recordsOfKind } from "@meta-sam/parser";
+import OpenAI, { toFile } from "openai";
+import { parseImageStream, parseVideoStream, recordsOfKind, frameIndexOf } from "@meta-sam/parser";
 
 export interface SamBox {
   objectId: number | string;
@@ -14,6 +14,10 @@ export interface SamBox {
   top: number;
   right: number;
   bottom: number;
+  // SAM's per-record confidence (token `c`), when the API populated it.
+  // Absent means the API omitted it, NOT zero. Preserved (Slice 4 W6) so
+  // Slice 6 evaluation can weight or filter by confidence.
+  confidence?: number;
 }
 
 export interface SamImageResult {
@@ -57,6 +61,152 @@ export function imageDimensions(buf: Buffer, mime: string): { width: number; hei
   return dims;
 }
 
+export interface SamVideoBox extends SamBox {
+  firstFrame: number;
+  lastFrame: number;
+  sightings: number;
+}
+
+export interface SamVideoResult {
+  outcome: string | null;
+  // One representative box per unique tracked object (first frame seen),
+  // with its frame span — the counted set. Per-frame boxes are NOT the
+  // count: one tracked object counts once, however many frames show it.
+  boxes: SamVideoBox[];
+  maskCount: number;
+  latencyMs: number;
+  frameWidth: number;
+  frameHeight: number;
+  framesWithBoxes: number;
+  maxFrame: number;
+  // Total per-frame box records before objectId dedupe (auditability:
+  // the video analogue of the image path's raw_box_count).
+  boxRecords: number;
+}
+
+// Minimal MP4 dimension reader: walks moov > trak > tkhd and reads the
+// 16.16 fixed-point width/height. Box records from the parser do not carry
+// frame size, so the file itself is the source of truth for the video
+// coverage math (border-touch, min-size filter).
+export function mp4Dimensions(buf: Buffer): { width: number; height: number } | null {
+  function walk(start: number, end: number, depth: number): { width: number; height: number } | null {
+    let i = start;
+    while (i + 8 <= end) {
+      const size = buf.readUInt32BE(i);
+      const type = buf.subarray(i + 4, i + 8).toString("ascii");
+      let header = 8;
+      let boxEnd: number;
+      if (size === 1) {
+        if (i + 16 > end) return null;
+        boxEnd = i + Number(buf.readBigUInt64BE(i + 8));
+        header = 16;
+      } else if (size === 0) {
+        boxEnd = end;
+      } else {
+        boxEnd = i + size;
+      }
+      if (boxEnd > end) return null;
+      if (type === "tkhd" && depth >= 2) {
+        const version = buf[i + header];
+        const off = i + header + (version === 1 ? 88 : 76);
+        if (off + 8 <= boxEnd) {
+          const width = buf.readUInt32BE(off) / 65536;
+          const height = buf.readUInt32BE(off + 4) / 65536;
+          if (width > 0 && height > 0) return { width, height };
+        }
+      }
+      if ((type === "moov" || type === "trak") && depth < 4) {
+        const found = walk(i + header, boxEnd, depth + 1);
+        if (found) return found;
+      }
+      i = boxEnd;
+    }
+    return null;
+  }
+  return walk(0, buf.length, 0);
+}
+
+// Slice 4 video path. Uploads the MP4 to Meta's Files API (purpose
+// user_data, verified live 2026-10-27), then calls sam-3.1 with an
+// input_video part carrying the returned file_id, and parses the stream
+// with parseVideoStream. Object ids are stable across frames of one
+// response (parser contract), so dedupe by objectId is the count.
+export async function analyzeVideo(filePath: string): Promise<SamVideoResult> {
+  const key = process.env.MODEL_API_KEY ?? "";
+  if (!key) {
+    throw new Error("Meta API not configured (MODEL_API_KEY missing)");
+  }
+  const client = new OpenAI({ apiKey: key, baseURL: "https://api.meta.ai/v1" });
+  const buf = readFileSync(filePath);
+  const dims = mp4Dimensions(buf);
+  if (!dims) throw new Error("could not read video dimensions");
+  const uploaded = await client.files.create({
+    file: await toFile(buf, "scan.mp4"),
+    purpose: "user_data",
+  });
+  const started = Date.now();
+  const stream = await client.responses.create({
+    model: "sam-3.1",
+    stream: true,
+    metadata: { mask_encoding: "one_bit", include_confidence: "true" },
+    input: [
+      {
+        role: "user",
+        content: [
+          { type: "input_text", text: "cardboard box" },
+          // input_video is a Meta extension the OpenAI SDK types do not
+          // name; it is sent as a plain wire object (verified live).
+          { type: "input_video", file_id: uploaded.id } as never,
+        ],
+      },
+    ],
+  });
+  const parsed = parseVideoStream(stream);
+  const result = await parsed.finalResult;
+  const latencyMs = Date.now() - started;
+  const outcome = result.outcome?.status ?? null;
+  if (outcome !== "completed") {
+    throw new Error(`SAM video segmentation incomplete (outcome: ${outcome ?? "unknown"})`);
+  }
+  const byObject = new Map<string, SamVideoBox>();
+  const framesWith = new Set<number>();
+  let maxFrame = -1;
+  for (const r of recordsOfKind(result.records, "box")) {
+    const frame = frameIndexOf(r) ?? 0;
+    framesWith.add(frame);
+    if (frame > maxFrame) maxFrame = frame;
+    const prev = byObject.get(String(r.objectId));
+    if (prev) {
+      prev.lastFrame = Math.max(prev.lastFrame, frame);
+      prev.sightings += 1;
+    } else {
+      byObject.set(String(r.objectId), {
+        objectId: r.objectId,
+        left: r.left,
+        top: r.top,
+        right: r.right,
+        bottom: r.bottom,
+        ...(r.confidence !== undefined ? { confidence: r.confidence } : {}),
+        firstFrame: frame,
+        lastFrame: frame,
+        sightings: 1,
+      });
+    }
+  }
+  const maskCount = recordsOfKind(result.records, "mask").length;
+  return {
+    outcome,
+    boxes: [...byObject.values()],
+    maskCount,
+    latencyMs,
+    frameWidth: dims.width,
+    frameHeight: dims.height,
+    framesWithBoxes: framesWith.size,
+    maxFrame,
+    boxRecords: recordsOfKind(result.records, "box").length,
+  };
+}
+
 export async function analyzeImage(filePath: string, mime: string): Promise<SamImageResult> {
   const key = process.env.MODEL_API_KEY ?? "";
   if (!key) {
@@ -70,7 +220,10 @@ export async function analyzeImage(filePath: string, mime: string): Promise<SamI
   const stream = await client.responses.create({
     model: "sam-3.1",
     stream: true,
-    metadata: { mask_encoding: "one_bit" },
+    // include_confidence asks SAM to populate the per-record `c` token so
+    // confidence survives into scan_detections (Slice 4 W6); records without
+    // it are still accepted, and absence never means zero.
+    metadata: { mask_encoding: "one_bit", include_confidence: "true" },
     input: [
       {
         role: "user",
@@ -93,7 +246,14 @@ export async function analyzeImage(filePath: string, mime: string): Promise<SamI
   for (const r of recordsOfKind(result.records, "box")) {
     if (seen.has(r.objectId)) continue;
     seen.add(r.objectId);
-    boxes.push({ objectId: r.objectId, left: r.left, top: r.top, right: r.right, bottom: r.bottom });
+    boxes.push({
+      objectId: r.objectId,
+      left: r.left,
+      top: r.top,
+      right: r.right,
+      bottom: r.bottom,
+      ...(r.confidence !== undefined ? { confidence: r.confidence } : {}),
+    });
   }
   const maskCount = recordsOfKind(result.records, "mask").length;
   return { outcome, boxes, maskCount, latencyMs, ...dims };

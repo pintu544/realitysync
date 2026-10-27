@@ -51,6 +51,7 @@ const MIGRATIONS: string[] = [
     raw_box_count INTEGER
   )`,
   `ALTER TABLE scan_detections ADD COLUMN IF NOT EXISTS raw_box_count INTEGER`,
+  `ALTER TABLE scan_detections ADD COLUMN IF NOT EXISTS video_stats JSONB`,
 ];
 
 let db: Db | null = null;

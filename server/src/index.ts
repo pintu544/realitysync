@@ -8,7 +8,7 @@ import express from "express";
 import multer from "multer";
 import { dbBackend, initDb, type Db } from "./db.js";
 import { seedFixtures } from "./seed.js";
-import { runAnalysis } from "./analyze.js";
+import { runAnalysis, inFlightAnalyses } from "./analyze.js";
 
 const app = express();
 app.use(express.json());
@@ -135,7 +135,7 @@ app.get("/api/inventory/:shelfId", async (req, res) => {
 
 // Upload a shelf photo/video and create a scan record. Slice 3: image
 // scans kick off SAM analysis asynchronously (the upload still returns
-// fast); video scans stay pending until Slice 4 video tracking lands.
+// fast); video scans analyze the same way via Slice 4 video tracking.
 //
 // Error paths delete the uploaded file (W3): a rejected upload must never
 // leave an orphan on disk, whatever the failure.
@@ -197,6 +197,7 @@ function withDetections(row: Record<string, unknown>): Record<string, unknown> {
           error: row.analysis_error ?? null,
           analyzed_at: row.analyzed_at ?? null,
           raw_box_count: row.raw_box_count ?? null,
+          video_stats: row.video_stats ?? null,
         }
       : null,
     needs_review: row.status === "analyzed" && row.coverage_status !== "full",
@@ -206,7 +207,7 @@ function withDetections(row: Record<string, unknown>): Record<string, unknown> {
 app.get("/api/scans", async (_req, res) => {
   const { rows } = await db.query(
     `SELECT s.*, i.shelf_id, i.sku, i.expected_qty,
-       d.boxes, d.mask_count, d.latency_ms, d.error AS analysis_error, d.analyzed_at, d.raw_box_count
+       d.boxes, d.mask_count, d.latency_ms, d.error AS analysis_error, d.analyzed_at, d.raw_box_count, d.video_stats
      FROM scans s JOIN inventory i ON i.id = s.inventory_id
      LEFT JOIN scan_detections d ON d.scan_id = s.id
      ORDER BY s.created_at DESC`,
@@ -217,7 +218,7 @@ app.get("/api/scans", async (_req, res) => {
 app.get("/api/scans/:id", async (req, res) => {
   const { rows } = await db.query(
     `SELECT s.*, i.shelf_id, i.sku, i.expected_qty,
-       d.boxes, d.mask_count, d.latency_ms, d.error AS analysis_error, d.analyzed_at, d.raw_box_count
+       d.boxes, d.mask_count, d.latency_ms, d.error AS analysis_error, d.analyzed_at, d.raw_box_count, d.video_stats
      FROM scans s JOIN inventory i ON i.id = s.inventory_id
      LEFT JOIN scan_detections d ON d.scan_id = s.id
      WHERE s.id = $1`,
@@ -230,9 +231,8 @@ app.get("/api/scans/:id", async (req, res) => {
   res.json(withDetections(rows[0]));
 });
 
-// Re-run SAM analysis for a pending or failed scan. Analyzed scans and
-// video scans are refused: the former already has evidence, the latter
-// needs Slice 4 video tracking.
+// Re-run SAM analysis for a pending or failed scan. Analyzed scans are
+// refused; video scans analyze via Slice 4 video tracking.
 app.post("/api/scans/:id/analyze", async (req, res) => {
   const { rows } = await db.query("SELECT * FROM scans WHERE id = $1", [req.params.id]);
   if (rows.length === 0) {
@@ -244,12 +244,19 @@ app.post("/api/scans/:id/analyze", async (req, res) => {
     res.status(409).json({ error: "scan already analyzed" });
     return;
   }
-  if (typeof scan.media_url === "string" && scan.media_url.endsWith(".mp4")) {
-    res.status(409).json({ error: "video analysis arrives in Slice 4" });
+  if (inFlightAnalyses.has(req.params.id)) {
+    res.status(409).json({ error: "analysis already running" });
     return;
   }
   void runAnalysis(db, req.params.id);
   res.json({ scanId: req.params.id, status: "pending" });
+});
+
+// I1: unknown API routes answer JSON 404, never an HTML fallback. This
+// sits after all API routes and before the error handler; the production
+// SPA catch-all below only serves non-API paths.
+app.use("/api", (_req, res) => {
+  res.status(404).json({ error: "not found" });
 });
 
 // Error handler (W2): API errors are always JSON, never an HTML stack trace.

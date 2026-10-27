@@ -4,5 +4,7 @@
   "eval-8.png": 8,
   "eval-occluded.png": "5 physical, 1 edge-clipped + 1 heavily occluded -> count uncertain",
   "eval-empty.png": 0,
-  "eval-3.jpg": 3
+  "eval-3.jpg": 3,
+  "eval-partial.png": "6 physical (5 full + 1 edge-clipped) -> count uncertain, clipped box may be missed",
+  "eval-partial-labeled.png": "6 physical (5 full + 1 edge-clipped) -> partial branch, needs_review"
 }
