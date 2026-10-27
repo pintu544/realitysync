@@ -16,6 +16,12 @@ interface DetectionBox {
   bottom: number;
 }
 
+interface VideoStats {
+  framesWithBoxes: number;
+  maxFrame: number;
+  uniqueObjects: number;
+}
+
 interface Detections {
   boxes: DetectionBox[] | null;
   mask_count: number | null;
@@ -23,6 +29,7 @@ interface Detections {
   error: string | null;
   analyzed_at: string | null;
   raw_box_count: number | null;
+  video_stats: VideoStats | null;
 }
 
 interface ScanRow {
@@ -94,9 +101,10 @@ function ScanMedia({ scan }: { scan: ScanRow }) {
         <video src={scan.media_url} controls className="max-h-80 w-full bg-slate-200 object-contain" />
         {scan.status === "analyzed" && scan.coverage_status === "unknown" && (scan.visible_qty ?? 0) === 0 && (
           <p className="mt-2 text-xs text-slate-600">
-            No objects were tracked in this video. SAM video tracking needs
-            camera motion — re-record with a slow pan past the shelf instead
-            of a static shot. This is not evidence the shelf is empty.
+            No objects were tracked in this video. In our test clips,
+            static shots returned no detections — re-record with a slow
+            pan past the shelf instead of a static shot. This is not
+            evidence the shelf is empty.
           </p>
         )}
       </div>
@@ -150,6 +158,10 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [pollTimedOut, setPollTimedOut] = useState(false);
+  // Slice 4 QA W5: bumping this restarts the poll effect after a retry.
+  // Without it, retry hid the banner without resuming polling, leaving a
+  // stuck-pending scan with no auto-update and no manual control.
+  const [pollCycle, setPollCycle] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -205,7 +217,7 @@ export default function App() {
       stopped = true;
       clearInterval(timer);
     };
-  }, [selected?.id, selected?.status]);
+  }, [selected?.id, selected?.status, pollCycle]);
   // Footnote source: the selected scan's own shelf record, not the upload
   // dropdown (I4) — the two can differ once a scan from another shelf is picked.
   const selectedInventory = inventory.find((i) => i.shelf_id === selected?.shelf_id) ?? null;
@@ -315,8 +327,8 @@ export default function App() {
                 <p className="mb-4 text-sm text-slate-600">
                   Upload a shelf photo or a 10–15 second video. Scans analyze
                   in the background after upload; for video, a slow pan past
-                  the shelf tracks best — a fully static shot can return no
-                  detections at all.
+                  the shelf tracks best — in our test clips, fully static
+                  shots returned no detections.
                 </p>
                 <form onSubmit={handleUpload} className="space-y-4">
                   <div>
@@ -362,7 +374,9 @@ export default function App() {
                     <p className="mt-2 text-xs text-slate-500">
                       Scan {selected.id} · {formatTime(selected.created_at)}
                     </p>
-                    {selected.status === "analyzed" && (selected.detections?.boxes?.length ?? 0) > 0 && (
+                    {selected.status === "analyzed" &&
+                      !selected.media_url.match(/\.mp4$/i) &&
+                      (selected.detections?.boxes?.length ?? 0) > 0 && (
                       <p className="mt-1 text-xs text-slate-600">
                         Numbered outlines are SAM 3.1 detections on this image — one outline
                         per visible object counted.
@@ -427,6 +441,12 @@ export default function App() {
                                 const body = await res.json().catch(() => ({}));
                                 throw new Error((body as { error?: string }).error ?? `Retry failed (${res.status})`);
                               }
+                              // W5: refresh first, then restart polling via
+                              // pollCycle — the effect's stopped flag is
+                              // already true and id/status are unchanged, so
+                              // without the bump nothing would poll again.
+                              await refresh();
+                              setPollCycle((c) => c + 1);
                               setPollTimedOut(false);
                               setNotice("Analysis restarted — this scan updates automatically when it finishes.");
                             } catch (err: unknown) {
@@ -494,9 +514,21 @@ export default function App() {
                         {selected.detections.raw_box_count != null &&
                           selected.detections.raw_box_count !== (selected.detections.boxes?.length ?? 0) && (
                             <p className="text-xs text-slate-500">
-                              Counting note: SAM returned {selected.detections.raw_box_count} raw
-                              segments; {(selected.detections.boxes?.length ?? 0)} remain after
-                              merging vertical tape-line splits.
+                              {selected.detections.video_stats ? (
+                                <>
+                                  Counting note: SAM tracked{" "}
+                                  {selected.detections.video_stats.uniqueObjects} objects across{" "}
+                                  {selected.detections.video_stats.framesWithBoxes} frames (
+                                  {selected.detections.raw_box_count} per-frame detections); the
+                                  count dedupes by track ID, not by merging tape-line splits.
+                                </>
+                              ) : (
+                                <>
+                                  Counting note: SAM returned {selected.detections.raw_box_count} raw
+                                  segments; {(selected.detections.boxes?.length ?? 0)} remain after
+                                  merging vertical tape-line splits.
+                                </>
+                              )}
                             </p>
                           )}
                       </>

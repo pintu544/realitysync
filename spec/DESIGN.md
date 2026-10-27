@@ -59,8 +59,6 @@ counting rule corrects exactly this artifact, deterministically:
   (a gap of up to 10px, or an overlap of up to 2px — the 2px edge jitter that broke
   the one-directional gap check in Slice 3 QA W1). Merge transitively until no pair
   qualifies; the merged box is the union of bounds and keeps the first objectId.
-- Merge transitively until no pair qualifies; the merged box is the union
-  of bounds and keeps the first objectId.
 - The visible count and coverage are computed from MERGED boxes; the raw
   segment count is preserved as `raw_box_count` on the detection row for
   auditability. The UI draws merged boxes only (one outline per counted
@@ -144,6 +142,13 @@ Video coverage (same consequences as images — only `full` is confident):
 `unknown` when zero objects are tracked; `partial` when boxes appear in
 <80% of frames up to the max observed frame, or a representative box
 touches a border (2%) or heavily overlaps (IoU > 0.5); otherwise `full`.
+
+Denominator note (Slice 4 QA fix round): the <80% rule's denominator is
+`maxFrame + 1` — frames spanned by detections, NOT clip length. A clip
+whose tracking dies halfway and never recovers (boxes in frames 0–19 of a
+40-frame clip) still reads `full` (20/20). Slice 6 decides whether to use
+total clip frames (MP4 duration/fps) instead; until then the gap is
+documented here, not papered over.
 
 MEASURED LIMITATION (probe evidence, spec/eval-s4.md): SAM video
 tracking needs camera motion. A slow-pan clip tracks 6/6 objects with

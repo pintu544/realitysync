@@ -177,6 +177,16 @@ app.post("/api/scans", upload.single("media"), async (req, res) => {
   void runAnalysis(db, scanId);
 });
 
+// Slice 4 QA C1: a non-UUID scan id must never reach a uuid column —
+// real Postgres rejects it exactly like pg-mem does, and Express 4 does
+// not catch rejected async handlers, so the process dies. Validate the
+// shape first (400), and keep a try/catch around the queries anyway so
+// any other DB failure answers JSON instead of killing the server.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function isUuid(id: string): boolean {
+  return UUID_RE.test(id);
+}
+
 function withDetections(row: Record<string, unknown>): Record<string, unknown> {
   let boxes: unknown = row.boxes ?? null;
   if (typeof boxes === "string") {
@@ -184,6 +194,17 @@ function withDetections(row: Record<string, unknown>): Record<string, unknown> {
       boxes = JSON.parse(boxes);
     } catch {
       boxes = null;
+    }
+  }
+  // Same treatment for video_stats: pg-mem returns the JSONB column as a
+  // string, real Postgres as an object. The client reads .uniqueObjects /
+  // .framesWithBoxes off it, so a raw string would render blank counts.
+  let videoStats: unknown = row.video_stats ?? null;
+  if (typeof videoStats === "string") {
+    try {
+      videoStats = JSON.parse(videoStats);
+    } catch {
+      videoStats = null;
     }
   }
   const hasDetections = row.boxes !== null && row.boxes !== undefined;
@@ -197,7 +218,7 @@ function withDetections(row: Record<string, unknown>): Record<string, unknown> {
           error: row.analysis_error ?? null,
           analyzed_at: row.analyzed_at ?? null,
           raw_box_count: row.raw_box_count ?? null,
-          video_stats: row.video_stats ?? null,
+          video_stats: videoStats,
         }
       : null,
     needs_review: row.status === "analyzed" && row.coverage_status !== "full",
@@ -216,14 +237,24 @@ app.get("/api/scans", async (_req, res) => {
 });
 
 app.get("/api/scans/:id", async (req, res) => {
-  const { rows } = await db.query(
-    `SELECT s.*, i.shelf_id, i.sku, i.expected_qty,
+  if (!isUuid(req.params.id)) {
+    res.status(400).json({ error: "invalid scan id" });
+    return;
+  }
+  let rows;
+  try {
+    ({ rows } = await db.query(
+      `SELECT s.*, i.shelf_id, i.sku, i.expected_qty,
        d.boxes, d.mask_count, d.latency_ms, d.error AS analysis_error, d.analyzed_at, d.raw_box_count, d.video_stats
      FROM scans s JOIN inventory i ON i.id = s.inventory_id
      LEFT JOIN scan_detections d ON d.scan_id = s.id
      WHERE s.id = $1`,
-    [req.params.id],
-  );
+      [req.params.id],
+    ));
+  } catch {
+    res.status(500).json({ error: "internal error" });
+    return;
+  }
   if (rows.length === 0) {
     res.status(404).json({ error: "scan not found" });
     return;
@@ -234,7 +265,17 @@ app.get("/api/scans/:id", async (req, res) => {
 // Re-run SAM analysis for a pending or failed scan. Analyzed scans are
 // refused; video scans analyze via Slice 4 video tracking.
 app.post("/api/scans/:id/analyze", async (req, res) => {
-  const { rows } = await db.query("SELECT * FROM scans WHERE id = $1", [req.params.id]);
+  if (!isUuid(req.params.id)) {
+    res.status(400).json({ error: "invalid scan id" });
+    return;
+  }
+  let rows;
+  try {
+    ({ rows } = await db.query("SELECT * FROM scans WHERE id = $1", [req.params.id]));
+  } catch {
+    res.status(500).json({ error: "internal error" });
+    return;
+  }
   if (rows.length === 0) {
     res.status(404).json({ error: "scan not found" });
     return;
