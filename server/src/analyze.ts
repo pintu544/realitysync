@@ -15,6 +15,7 @@ import { join, extname, basename } from "node:path";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { analyzeImage, analyzeVideo, type SamBox, type SamVideoBox } from "./sam.js";
+import { ensureAuditCase } from "./investigate.js";
 import type { Db } from "./db.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -197,21 +198,21 @@ async function runAnalysisInner(
   try {
     if (mime === "video/mp4") {
       await runVideoAnalysis(db, scanId, filePath);
-      return;
+    } else {
+      const result = await analyzeImage(filePath, mime);
+      const filtered = filterSmallBoxes(result.boxes, result.width, result.height);
+      const boxes = mergeVerticalSplits(filtered, result.width);
+      const coverage = classifyCoverage(boxes, result.width, result.height);
+      await db.query("DELETE FROM scan_detections WHERE scan_id = $1", [scanId]);
+      await db.query(
+        "INSERT INTO scan_detections (scan_id, boxes, mask_count, latency_ms, error, analyzed_at, raw_box_count) VALUES ($1, $2, $3, $4, NULL, NOW(), $5)",
+        [scanId, JSON.stringify(boxes), result.maskCount, result.latencyMs, result.boxes.length],
+      );
+      await db.query(
+        "UPDATE scans SET visible_qty = $1, coverage_status = $2, status = 'analyzed' WHERE id = $3",
+        [boxes.length, coverage, scanId],
+      );
     }
-    const result = await analyzeImage(filePath, mime);
-    const filtered = filterSmallBoxes(result.boxes, result.width, result.height);
-    const boxes = mergeVerticalSplits(filtered, result.width);
-    const coverage = classifyCoverage(boxes, result.width, result.height);
-    await db.query("DELETE FROM scan_detections WHERE scan_id = $1", [scanId]);
-    await db.query(
-      "INSERT INTO scan_detections (scan_id, boxes, mask_count, latency_ms, error, analyzed_at, raw_box_count) VALUES ($1, $2, $3, $4, NULL, NOW(), $5)",
-      [scanId, JSON.stringify(boxes), result.maskCount, result.latencyMs, result.boxes.length],
-    );
-    await db.query(
-      "UPDATE scans SET visible_qty = $1, coverage_status = $2, status = 'analyzed' WHERE id = $3",
-      [boxes.length, coverage, scanId],
-    );
   } catch (err) {
     const message = err instanceof Error ? err.message : "analysis failed";
     // I2: filesystem errors map to a generic message — never persist a
@@ -234,6 +235,16 @@ async function runAnalysisInner(
     } catch {
       console.error("analysis failure could not be recorded");
     }
+  }
+  // Slice 5: a scan that reached `analyzed` gets its audit case (Spark
+  // investigation when it needs attention). This runs AFTER the
+  // try/catch above on purpose: a case problem must never flip a scan
+  // back out of `analyzed`, and failed scans get no case at all
+  // (ensureAuditCase returns null for non-analyzed scans).
+  try {
+    await ensureAuditCase(db, scanId);
+  } catch {
+    console.error("audit case generation failed");
   }
 }
 

@@ -9,6 +9,7 @@ import multer from "multer";
 import { dbBackend, initDb, type Db } from "./db.js";
 import { seedFixtures } from "./seed.js";
 import { runAnalysis, inFlightAnalyses } from "./analyze.js";
+import { ensureAuditCase, parseAuditCase } from "./investigate.js";
 
 const app = express();
 app.use(express.json());
@@ -222,15 +223,30 @@ function withDetections(row: Record<string, unknown>): Record<string, unknown> {
         }
       : null,
     needs_review: row.status === "analyzed" && row.coverage_status !== "full",
+    // Slice 5: the audit case travels with the scan (null until analysis
+    // completes — failed scans never get a case).
+    audit_case:
+      row.case_id === null || row.case_id === undefined
+        ? null
+        : parseAuditCase({
+            id: row.case_id,
+            scan_id: row.id,
+            recommendation: row.case_recommendation,
+            state: row.case_state,
+            approved_qty: null,
+            created_at: "",
+          }),
   };
 }
 
 app.get("/api/scans", async (_req, res) => {
   const { rows } = await db.query(
     `SELECT s.*, i.shelf_id, i.sku, i.expected_qty,
-       d.boxes, d.mask_count, d.latency_ms, d.error AS analysis_error, d.analyzed_at, d.raw_box_count, d.video_stats
+       d.boxes, d.mask_count, d.latency_ms, d.error AS analysis_error, d.analyzed_at, d.raw_box_count, d.video_stats,
+       a.id AS case_id, a.recommendation AS case_recommendation, a.state AS case_state
      FROM scans s JOIN inventory i ON i.id = s.inventory_id
      LEFT JOIN scan_detections d ON d.scan_id = s.id
+     LEFT JOIN audit_cases a ON a.scan_id = s.id
      ORDER BY s.created_at DESC`,
   );
   res.json(rows.map(withDetections));
@@ -245,9 +261,11 @@ app.get("/api/scans/:id", async (req, res) => {
   try {
     ({ rows } = await db.query(
       `SELECT s.*, i.shelf_id, i.sku, i.expected_qty,
-       d.boxes, d.mask_count, d.latency_ms, d.error AS analysis_error, d.analyzed_at, d.raw_box_count, d.video_stats
+       d.boxes, d.mask_count, d.latency_ms, d.error AS analysis_error, d.analyzed_at, d.raw_box_count, d.video_stats,
+       a.id AS case_id, a.recommendation AS case_recommendation, a.state AS case_state
      FROM scans s JOIN inventory i ON i.id = s.inventory_id
      LEFT JOIN scan_detections d ON d.scan_id = s.id
+     LEFT JOIN audit_cases a ON a.scan_id = s.id
      WHERE s.id = $1`,
       [req.params.id],
     ));
@@ -291,6 +309,37 @@ app.post("/api/scans/:id/analyze", async (req, res) => {
   }
   void runAnalysis(db, req.params.id);
   res.json({ scanId: req.params.id, status: "pending" });
+});
+
+// Slice 5: re-run the Muse Spark investigation for an analyzed scan whose
+// case has no (or a failed) investigation. Idempotent: a case with an
+// investigation already present is returned unchanged, no second model call.
+app.post("/api/scans/:id/investigate", async (req, res) => {
+  if (!isUuid(req.params.id)) {
+    res.status(400).json({ error: "invalid scan id" });
+    return;
+  }
+  let rows;
+  try {
+    ({ rows } = await db.query("SELECT * FROM scans WHERE id = $1", [req.params.id]));
+  } catch {
+    res.status(500).json({ error: "internal error" });
+    return;
+  }
+  if (rows.length === 0) {
+    res.status(404).json({ error: "scan not found" });
+    return;
+  }
+  if (rows[0].status !== "analyzed") {
+    res.status(409).json({ error: "scan not analyzed yet" });
+    return;
+  }
+  const auditCase = await ensureAuditCase(db, req.params.id);
+  if (!auditCase) {
+    res.status(500).json({ error: "could not load audit case" });
+    return;
+  }
+  res.json({ audit_case: auditCase });
 });
 
 // I1: unknown API routes answer JSON 404, never an HTML fallback. This

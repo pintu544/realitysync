@@ -84,6 +84,17 @@ export async function initDb(): Promise<Db> {
   for (const sql of MIGRATIONS) {
     await db.query(sql);
   }
+  // One case per scan, enforced in the database as well as in code
+  // (investigate.ts re-checks before inserting). Tolerant on purpose: a
+  // pre-existing database with duplicate cases must not kill startup —
+  // the code-level guard still mitigates there.
+  try {
+    await db.query(
+      "CREATE UNIQUE INDEX IF NOT EXISTS audit_cases_scan_id_unique ON audit_cases(scan_id)",
+    );
+  } catch {
+    console.log("audit_cases unique index skipped (pre-existing duplicates?)");
+  }
   console.log(`database backend: ${backend}`);
   return db;
 }

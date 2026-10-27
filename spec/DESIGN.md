@@ -96,13 +96,101 @@ second Meta call for the same scan (which would double-charge and race the
 detection row). The guard covers both the upload-triggered run and the
 manual retry path.
 
+## Muse Spark investigation (Slice 5, documented before coding)
+
+Trigger: when a scan reaches `analyzed`, the server creates (or refreshes)
+an audit case for it. Muse Spark runs only when the scan needs human
+attention — visible count differs from ERP expected, or coverage is not
+`full`. A clean full-coverage match still gets a case, but with
+investigation `null` and the note "counts match; no investigation
+needed" (no model call is burned on a non-discrepancy). Failed scans get
+no case: there is no evidence to investigate.
+
+Evidence envelope (computed by code, never by the model): shelf_id, sku,
+expected_qty, visible_qty, difference (= visible − expected, computed
+here), coverage_status, media_type (image/video), merged box count,
+raw_box_count, mask_count, latency_ms, video_stats when video, and a
+compact per-box summary (index, border-touch flag, confidence when
+present). The model NEVER receives the media bytes — text evidence only
+— and it NEVER recomputes, reorders, or overrides the deterministic
+numbers. It explains and recommends; the backend counts.
+
+Grounding rules (pinned — the prompt states them, the server enforces
+what it can):
+- Invent nothing: no fabricated stock numbers, no invisible objects, no
+  guessed counts. Every finding must trace to a field of the envelope.
+- What is NOT known is stated, not filled in: true stock, occluded
+  contents, and why the ERP record differs are all unknown. A count
+  that differs from ERP does not prove theft, misplacement, or a data
+  error — those are hypotheses, labeled as such.
+- Unknown → needs_review: when coverage is `partial`/`unknown`, or the
+  evidence cannot support a conclusion, the case stays `needs_review`
+  and the recommended action must be a safe one (recount, clearer
+  photo, investigate further) — never an inventory change.
+- Inconsistency is flagged, never smoothed over: if envelope fields
+  disagree with each other (e.g. visible count vs box list length), the
+  model must say so explicitly instead of picking a consistent story.
+- The model proposes NO corrected quantity: the output schema has no
+  quantity field. A corrected number can only come from a human approval
+  (Slice 6), never from model text.
+- `safe_to_auto_update` is computed by code and is ALWAYS `false` in
+  Slice 5: no auto-update path exists yet, and Slice 6 defines the
+  criteria under which it could ever become true. The model cannot set
+  it. Case state stays `needs_review` in Slice 5 for the same reason.
+
+Output schema (validated strictly in code; anything else is a failure):
+`{ summary: string, findings: string[], recommended_action:
+"recount" | "clearer_photo" | "accept_visible_for_review" |
+"investigate_further" | "no_action", needs_review: boolean }`.
+Server overrides: if coverage is not `full`, the case stays
+`needs_review` even if the model says otherwise — the coverage rule
+wins over model text.
+
+Failure degradation (fail-closed): no key, API error, invalid JSON, or
+schema failure after one parse retry → the case is still created, with
+investigation `null` and an honest `investigation_error` note, state
+`needs_review`. A missing investigation is never papered over with a
+fabricated explanation.
+
+Audit trail: `audit_cases.recommendation` stores `{ deterministic:
+{expected_qty, visible_qty, difference}, evidence: <envelope>,
+investigation: <model output> | null, investigation_error: string |
+null, safe_to_auto_update: false }`, and every creation/refresh/failure
+writes an `audit_events` row, so any case can be reproduced from its
+stored evidence snapshot.
+
+Endpoints: `GET /api/scans/:id` includes `audit_case` (or null).
+`POST /api/scans/:id/investigate` re-runs investigation for an analyzed
+scan with no (or failed) investigation — 404 unknown scan, 400 invalid
+id, 409 pending/failed scan, 200 with the existing case when an
+investigation already exists (idempotent, no second model call).
+
+Token budget (measured 2026-10-27, do not shrink): muse-spark-1.3
+spends most of its completion budget on reasoning tokens before emitting
+content — a 2000-token cap was consumed entirely by reasoning (1998
+tokens) with zero content tokens and finish_reason `length`. The
+investigation call therefore uses max_tokens 12000, and a fence-strip +
+one parse retry + server-log preview guard the JSON parse.
+
+One case per scan: enforced by a unique index on
+`audit_cases(scan_id)` (tolerant — a pre-existing database with
+duplicates logs and continues) plus a re-check before insert and a
+winner-takes-all fallback on insert conflict, because the Spark call
+takes seconds and a concurrent `/investigate` request can otherwise
+create a second case.
+
 ## API contracts
 - `POST /api/scans` — upload media, start analysis → `{ scanId, status }`.
 - `GET /api/scans` — list scans, newest first (Slice 2 addition for scan history).
 - `GET /api/scans/:id` — progress, visible count, masks/evidence, audit case.
   Slice 3: also returns `detections` (boxes, mask_count, latency_ms,
   error) or null while unanalyzed, and `needs_review` (true unless
-  coverage is `full`).
+  coverage is `full`). Slice 5: also returns `audit_case` (the stored
+  recommendation + state) or null when no case exists yet.
+- `POST /api/scans/:id/investigate` — (Slice 5) re-run Muse Spark
+  investigation for an analyzed scan with no (or failed) investigation;
+  200 with the existing case when one already exists, 404 unknown scan,
+  400 invalid id, 409 pending/failed scan.
 - `POST /api/scans/:id/analyze` — (re-)run SAM analysis for a scan in
   `pending` or `failed` state; returns `{ scanId, status }` immediately
   and analyzes asynchronously. Refused (409) for already-`analyzed` scans,

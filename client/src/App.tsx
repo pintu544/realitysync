@@ -32,6 +32,26 @@ interface Detections {
   video_stats: VideoStats | null;
 }
 
+interface InvestigationView {
+  summary: string;
+  findings: string[];
+  recommended_action: string;
+  needs_review: boolean;
+}
+
+interface AuditCaseView {
+  id: string;
+  recommendation: {
+    deterministic?: { expected_qty: number; visible_qty: number; difference: number };
+    investigation?: InvestigationView | null;
+    investigation_error?: string | null;
+    note?: string | null;
+    safe_to_auto_update?: boolean;
+    needs_review?: boolean;
+  } | null;
+  state: string;
+}
+
 interface ScanRow {
   id: string;
   media_url: string;
@@ -44,7 +64,16 @@ interface ScanRow {
   expected_qty: number;
   detections: Detections | null;
   needs_review: boolean;
+  audit_case: AuditCaseView | null;
 }
+
+const ACTION_LABELS: Record<string, string> = {
+  recount: "Recount the shelf",
+  clearer_photo: "Take a clearer photo",
+  accept_visible_for_review: "Accept the visible count for review",
+  investigate_further: "Investigate further",
+  no_action: "No action needed",
+};
 
 async function fetchJson<T>(url: string): Promise<T> {
   const res = await fetch(url);
@@ -438,6 +467,18 @@ export default function App() {
                             try {
                               const res = await fetch(`/api/scans/${selected.id}/analyze`, { method: "POST" });
                               if (!res.ok) {
+                                // S5.0: a 409 means a run is already in
+                                // flight — restart polling instead of
+                                // stranding the user on manual Refresh:
+                                // the effect re-runs on pollCycle with a
+                                // fresh 90s window and picks up the
+                                // finished scan on its own.
+                                if (res.status === 409) {
+                                  await refresh();
+                                  setPollCycle((c) => c + 1);
+                                  setNotice("Analysis already running — this scan updates automatically when it finishes.");
+                                  return;
+                                }
                                 const body = await res.json().catch(() => ({}));
                                 throw new Error((body as { error?: string }).error ?? `Retry failed (${res.status})`);
                               }
@@ -552,10 +593,80 @@ export default function App() {
                   </p>
                 )}
                 <h3 className="mb-1 mt-6 text-sm font-semibold">AI investigation</h3>
-                <p className="text-sm text-slate-600">
-                  Muse Spark investigates the discrepancy from structured evidence only.
-                  That panel arrives with Slice 5; nothing here is model output yet.
-                </p>
+                {!selected || selected.status === "pending" ? (
+                  <p className="text-sm text-slate-600">
+                    Muse Spark investigates the discrepancy from structured evidence only,
+                    once analysis completes. Nothing here is model output yet.
+                  </p>
+                ) : selected.status === "failed" ? (
+                  <p className="text-sm text-slate-600">
+                    No investigation: analysis failed, so there is no evidence to investigate.
+                    Retry analysis first.
+                  </p>
+                ) : !selected.audit_case ? (
+                  <p className="text-sm text-slate-600">
+                    Investigation in progress — the audit case appears here when it is ready.
+                  </p>
+                ) : selected.audit_case.recommendation?.investigation ? (
+                  <div className="text-sm">
+                    <p className="text-xs text-slate-500">
+                      Investigation input, computed by code — not by the model: ERP{" "}
+                      {selected.audit_case.recommendation.deterministic?.expected_qty}, visible{" "}
+                      {selected.audit_case.recommendation.deterministic?.visible_qty}, difference{" "}
+                      {selected.audit_case.recommendation.deterministic?.difference}, coverage{" "}
+                      {selected.coverage_status}.
+                    </p>
+                    <p className="mt-2">{selected.audit_case.recommendation.investigation.summary}</p>
+                    {selected.audit_case.recommendation.investigation.findings.length > 0 && (
+                      <ul className="mt-2 list-disc space-y-1 pl-5">
+                        {selected.audit_case.recommendation.investigation.findings.map((f, i) => (
+                          <li key={i}>{f}</li>
+                        ))}
+                      </ul>
+                    )}
+                    <p className="mt-2 font-medium">
+                      Recommended next step:{" "}
+                      {ACTION_LABELS[selected.audit_case.recommendation.investigation.recommended_action] ??
+                        selected.audit_case.recommendation.investigation.recommended_action}
+                    </p>
+                    <p className="mt-2 text-xs text-slate-500">
+                      Model output, grounded in the evidence above — it recommends, it never
+                      changes inventory. No automatic update will happen
+                      (safe_to_auto_update is false); a human approval is the only path to
+                      a correction.
+                    </p>
+                  </div>
+                ) : selected.audit_case.recommendation?.note ? (
+                  <p className="text-sm text-slate-600">{selected.audit_case.recommendation.note}</p>
+                ) : (
+                  <div className="text-sm">
+                    <p className="text-slate-600">
+                      Investigation unavailable:{" "}
+                      {selected.audit_case.recommendation?.investigation_error ?? "unknown error"}.
+                      No explanation was fabricated — the case stays open for review.
+                    </p>
+                    <button
+                      type="button"
+                      className="mt-2 font-semibold underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+                      onClick={async () => {
+                        setError(null);
+                        try {
+                          const res = await fetch(`/api/scans/${selected.id}/investigate`, { method: "POST" });
+                          if (!res.ok) {
+                            const body = await res.json().catch(() => ({}));
+                            throw new Error((body as { error?: string }).error ?? `Investigation failed (${res.status})`);
+                          }
+                          await refresh();
+                          setNotice("Investigation updated.");
+                        } catch (err: unknown) {
+                          setError(err instanceof Error ? err.message : "Investigation failed.");
+                        }
+                      }}
+                    >
+                      Retry investigation
+                    </button>
+                  </div>
+                )}
                 {selectedInventory && selected && (
                   <p className="mt-4 text-xs text-slate-500">
                     Expected quantity above comes from the simulated ERP record for shelf{" "}
@@ -568,8 +679,8 @@ export default function App() {
             <section aria-label="Scan history and audit" className="mt-6 bg-white p-5 shadow-sm">
               <h2 className="mb-1 text-lg font-semibold">Scan history</h2>
               <p className="mb-4 text-sm text-slate-600">
-                Select a scan to inspect its media and comparison. Audit cases and the
-                approve/reject controls arrive with Slices 5–6; no audit case exists yet.
+                Select a scan to inspect its media, comparison, and audit case. Approve/reject
+                controls arrive with Slice 6; until then every case stays open for review.
               </p>
               {scans.length === 0 ? (
                 <p className="text-sm text-slate-600">No scans yet.</p>
