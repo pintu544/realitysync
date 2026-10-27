@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
-import { dirname, extname, join } from "node:path";
+import { unlink } from "node:fs/promises";
+import { open } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
 import multer from "multer";
@@ -18,21 +20,83 @@ const LLM_MODEL = process.env.LLM_MODEL ?? "";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const UPLOADS_DIR = join(HERE, "..", "uploads");
 mkdirSync(UPLOADS_DIR, { recursive: true });
-app.use("/uploads", express.static(UPLOADS_DIR));
 
-const ACCEPTED_MIMES = new Set(["image/png", "image/jpeg", "video/mp4"]);
+// Uploaded media is user-supplied content: never serve it inline as an
+// executable document. Attachment disposition + nosniff + a sandbox CSP mean
+// that even a mislabeled file cannot run script in the app origin.
+app.use(
+  "/uploads",
+  express.static(UPLOADS_DIR, {
+    setHeaders(res) {
+      res.setHeader("Content-Disposition", "attachment");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("Content-Security-Policy", "default-src 'none'; sandbox");
+    },
+  }),
+);
+
+// The saved extension is derived ONLY from the validated MIME type — never
+// from the client-supplied original filename (C1: a spoofed .html name).
+const MIME_TO_EXT: Record<string, string> = {
+  "image/png": ".png",
+  "image/jpeg": ".jpg",
+  "video/mp4": ".mp4",
+};
+const ACCEPTED_MIMES = new Set(Object.keys(MIME_TO_EXT));
 const upload = multer({
   storage: multer.diskStorage({
     destination: UPLOADS_DIR,
     filename: (_req, file, cb) => {
-      cb(null, `${randomUUID()}${extname(file.originalname).toLowerCase()}`);
+      cb(null, `${randomUUID()}${MIME_TO_EXT[file.mimetype] ?? ""}`);
     },
   }),
   limits: { fileSize: 25 * 1024 * 1024 },
-  fileFilter: (_req, file, cb) => {
-    cb(null, ACCEPTED_MIMES.has(file.mimetype));
+  fileFilter: (req, file, cb) => {
+    if (ACCEPTED_MIMES.has(file.mimetype)) {
+      cb(null, true);
+    } else {
+      // Remember the rejection so the handler can answer 415 (file present
+      // but wrong type) instead of 400 (no file at all).
+      (req as unknown as { fileRejectedMime?: boolean }).fileRejectedMime = true;
+      cb(null, false);
+    }
   },
 });
+
+async function removeQuiet(path: string): Promise<void> {
+  try {
+    await unlink(path);
+  } catch {
+    // Best-effort cleanup; a missing file is not an error.
+  }
+}
+
+// Cheap magic-byte check: the file's first bytes must match the MIME type
+// multer accepted. A spoofed .html body with Content-Type image/png fails
+// here and is deleted before any scan record exists.
+const PNG_SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+async function magicMatches(path: string, mime: string): Promise<boolean> {
+  let fh;
+  try {
+    fh = await open(path, "r");
+    const buf = Buffer.alloc(12);
+    const { bytesRead } = await fh.read(buf, 0, 12, 0);
+    if (mime === "image/png") {
+      return bytesRead >= 8 && buf.subarray(0, 8).equals(PNG_SIG);
+    }
+    if (mime === "image/jpeg") {
+      return bytesRead >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
+    }
+    if (mime === "video/mp4") {
+      return bytesRead >= 8 && buf.subarray(4, 8).toString("ascii") === "ftyp";
+    }
+    return false;
+  } catch {
+    return false;
+  } finally {
+    await fh?.close();
+  }
+}
 
 let db: Db;
 
@@ -71,23 +135,42 @@ app.get("/api/inventory/:shelfId", async (req, res) => {
 // Upload a shelf photo/video and create a scan record. SAM wiring is Slice 3:
 // a scan created here stays `pending` (visible_qty null, coverage `unknown`)
 // until Slice 3 analysis runs.
+//
+// Error paths delete the uploaded file (W3): a rejected upload must never
+// leave an orphan on disk, whatever the failure.
 app.post("/api/scans", upload.single("media"), async (req, res) => {
   const shelfId = typeof req.body?.shelfId === "string" ? req.body.shelfId : "A-01";
   if (!req.file) {
-    res.status(400).json({ error: "media file required (PNG/JPG/MP4)" });
+    const rejected = (req as unknown as { fileRejectedMime?: boolean }).fileRejectedMime;
+    res
+      .status(rejected ? 415 : 400)
+      .json({ error: rejected ? "unsupported media type (PNG/JPG/MP4 only)" : "media file required (PNG/JPG/MP4)" });
+    return;
+  }
+  const filePath = req.file.path;
+  if (!(await magicMatches(filePath, req.file.mimetype))) {
+    await removeQuiet(filePath);
+    res.status(415).json({ error: "file content does not match its media type" });
     return;
   }
   const inv = await db.query("SELECT id FROM inventory WHERE shelf_id = $1", [shelfId]);
   if (inv.rows.length === 0) {
+    await removeQuiet(filePath);
     res.status(404).json({ error: "shelf not found" });
     return;
   }
   const scanId = randomUUID();
   const mediaUrl = `/uploads/${req.file.filename}`;
-  await db.query(
-    "INSERT INTO scans (id, inventory_id, media_url, status) VALUES ($1, $2, $3, 'pending')",
-    [scanId, inv.rows[0].id, mediaUrl],
-  );
+  try {
+    await db.query(
+      "INSERT INTO scans (id, inventory_id, media_url, status) VALUES ($1, $2, $3, 'pending')",
+      [scanId, inv.rows[0].id, mediaUrl],
+    );
+  } catch {
+    await removeQuiet(filePath);
+    res.status(500).json({ error: "failed to create scan" });
+    return;
+  }
   res.status(201).json({ scanId, status: "pending", mediaUrl });
 });
 
@@ -109,6 +192,39 @@ app.get("/api/scans/:id", async (req, res) => {
   }
   res.json(rows[0]);
 });
+
+// Error handler (W2): API errors are always JSON, never an HTML stack trace.
+// Multer limit breaches are 413; other multer errors are 400. Any file that
+// survived a failed upload is removed here too.
+app.use(
+  (
+    err: unknown,
+    req: express.Request,
+    res: express.Response,
+    next: express.NextFunction,
+  ) => {
+    if (req.file) {
+      void removeQuiet(req.file.path);
+    }
+    if (err instanceof multer.MulterError) {
+      if (err.code === "LIMIT_FILE_SIZE") {
+        res.status(413).json({ error: "file exceeds the 25MB limit" });
+        return;
+      }
+      res.status(400).json({ error: `upload rejected (${err.code})` });
+      return;
+    }
+    if (err instanceof SyntaxError) {
+      res.status(400).json({ error: "malformed JSON body" });
+      return;
+    }
+    if (!res.headersSent) {
+      res.status(500).json({ error: "internal error" });
+    } else {
+      next(err);
+    }
+  },
+);
 
 // Production single-service shape: serve the client dist for non-API routes.
 if (process.env.NODE_ENV === "production") {

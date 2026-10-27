@@ -6,12 +6,12 @@ Meta Global AI Developer Hackathon — Indie Dev Track, "Build for Your World".
 
 ## Status
 
-Slice 1 (foundation + SAM probe) in progress. See `spec/` for the contract: `GRILL.md`, `SPEC.md`, `DESIGN.md`, `TASKS.md`, `research.md`.
+Slice 2 done (Postgres/pg-mem DB, migrations, fixtures, upload UI + scan history). Slice 3 next: SAM masks + count validation. See `spec/` for the contract: `GRILL.md`, `SPEC.md`, `DESIGN.md`, `TASKS.md`, `research.md`.
 
 ## Layout
 
-- `client/` — React + Vite + Tailwind frontend (skeleton).
-- `server/` — Node.js + Express + TypeScript API (skeleton, `/api/health`).
+- `client/` — React + Vite + Tailwind frontend.
+- `server/` — Node.js + Express + TypeScript API (`/api/health`, inventory, scans).
 
 ## Run locally
 

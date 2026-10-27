@@ -53,6 +53,11 @@ export function dbBackend(): string {
 export async function initDb(): Promise<Db> {
   if (db) return db;
   const url = process.env.DATABASE_URL ?? "";
+  if (!url && process.env.NODE_ENV === "production") {
+    // W1: never silently run the in-memory dev DB in production — a missing
+    // DATABASE_URL is a deployment misconfiguration, not a fallback case.
+    throw new Error("DATABASE_URL must be set when NODE_ENV=production");
+  }
   if (url) {
     const pool = new Pool({ connectionString: url });
     db = { query: (text, params) => pool.query(text, params as any) };

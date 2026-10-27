@@ -62,7 +62,9 @@ export default function App() {
   }, [refresh]);
 
   const selected = scans.find((s) => s.id === selectedId) ?? scans[0] ?? null;
-  const selectedInventory = inventory.find((i) => i.shelf_id === shelfId) ?? null;
+  // Footnote source: the selected scan's own shelf record, not the upload
+  // dropdown (I4) — the two can differ once a scan from another shelf is picked.
+  const selectedInventory = inventory.find((i) => i.shelf_id === selected?.shelf_id) ?? null;
 
   async function handleUpload(e: React.FormEvent) {
     e.preventDefault();
