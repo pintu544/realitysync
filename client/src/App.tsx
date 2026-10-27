@@ -50,6 +50,49 @@ interface AuditCaseView {
     needs_review?: boolean;
   } | null;
   state: string;
+  approved_qty: number | null;
+  inventory_version: number | null;
+  reject_reason: string | null;
+}
+
+interface MetricsEvalCase {
+  file: string;
+  kind: string;
+  truth: number | null;
+  uncertain: boolean;
+  status: string;
+  visible: number | null;
+  coverage: string | null;
+  needs_review: boolean | null;
+  latency_ms: number | null;
+  case_state: string | null;
+  investigation_action: string | null;
+}
+
+interface MetricsView {
+  live: {
+    scansByStatusCoverage: Array<{ status: string; coverage_status: string; n: number }>;
+    casesByState: Array<{ state: string; n: number }>;
+    avgLatencyMs: number | null;
+    analyzedScans: number;
+    videoScans: number;
+  };
+  evalRun: {
+    run: { date: string; label: string; note: string; n: number };
+    metrics: {
+      analyzed: number;
+      failed: number;
+      exactConfident: { hit: number; of: number };
+      countMatch: { hit: number; of: number };
+      uncertainFlagRecall: { hit: number; of: number };
+      confidentWrong: { hit: number; of: number; files: string[] };
+      avgLatencyMs: { image: number | null; video: number | null };
+      caseCreationRate: { hit: number; of: number };
+      videoCaseLive: { hit: number; of: number };
+      investigationActions: Record<string, number>;
+    };
+    cases: MetricsEvalCase[];
+  } | null;
 }
 
 interface ScanRow {
@@ -194,6 +237,12 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  // Slice 6 approval panel state: the quantity input defaults to the
+  // visible count but is the human's verified judgment, not the model's.
+  const [approveQty, setApproveQty] = useState("");
+  const [rejectReason, setRejectReason] = useState("");
+  const [deciding, setDeciding] = useState(false);
+  const [metrics, setMetrics] = useState<MetricsView | null>(null);
 
   const refresh = useCallback(async () => {
     const [inv, history] = await Promise.all([
@@ -208,9 +257,21 @@ export default function App() {
     refresh()
       .catch((e: unknown) => setError(e instanceof Error ? e.message : "Failed to load"))
       .finally(() => setLoading(false));
+    // Metrics are display-only (live aggregates + the last labeled eval
+    // run); a failure here never blocks the core screen.
+    fetchJson<MetricsView>("/api/metrics")
+      .then(setMetrics)
+      .catch(() => {});
   }, [refresh]);
 
   const selected = scans.find((s) => s.id === selectedId) ?? scans[0] ?? null;
+
+  // Reset the approval inputs whenever the selected scan changes, so the
+  // quantity input always defaults to THIS scan's visible count.
+  useEffect(() => {
+    setApproveQty(selected?.visible_qty != null ? String(selected.visible_qty) : "");
+    setRejectReason("");
+  }, [selected?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Poll a scan while it is pending: analysis runs in the
   // background on the server, and the row updates itself when done.
@@ -281,6 +342,50 @@ export default function App() {
       setError(err instanceof Error ? err.message : "Upload failed. Check the file and try again.");
     } finally {
       setUploading(false);
+    }
+  }
+
+  // Slice 6 decision: approve a human-entered corrected quantity, or
+  // reject with a reason. The server enforces the version guard and
+  // atomicity; here we only surface its verdicts (including the stale
+  // versions, which fetchJson would otherwise drop).
+  async function decide(action: "approve" | "reject") {
+    if (!selected?.audit_case) return;
+    if (action === "approve" && approveQty.trim() === "") {
+      setError("Enter a corrected quantity before approving.");
+      return;
+    }
+    setError(null);
+    setDeciding(true);
+    try {
+      const body =
+        action === "approve" ? { approvedQty: Number(approveQty) } : { reason: rejectReason };
+      const res = await fetch(`/api/audits/${selected.audit_case.id}/${action}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const detail =
+          data.recordedVersion !== undefined
+            ? ` (recorded version ${data.recordedVersion}, current version ${data.currentVersion})`
+            : "";
+        throw new Error(`${data.error ?? `Decision failed (${res.status})`}${detail}`);
+      }
+      await refresh();
+      fetchJson<MetricsView>("/api/metrics")
+        .then(setMetrics)
+        .catch(() => {});
+      setNotice(
+        action === "approve"
+          ? "Correction approved — simulated ERP record updated."
+          : "Case rejected — inventory untouched.",
+      );
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Decision failed.");
+    } finally {
+      setDeciding(false);
     }
   }
 
@@ -582,12 +687,14 @@ export default function App() {
                   <div role="status" className="mt-4 border border-amber-500 bg-amber-50 px-3 py-2 text-sm text-amber-900">
                     Needs review — coverage is {selected.coverage_status}, so this count is
                     observed, not confident. Do not correct inventory from this scan; a
-                    recount or a clearer photo is the safe next step.
+                    recount or a clearer {selected.media_url.match(/\.mp4$/i) ? "clip" : "photo"}{" "}
+                    is the safe next step.
                   </div>
                 )}
                 {selected && selected.status === "analyzed" && !selected.needs_review && (
                   <p className="mt-4 text-sm text-slate-600">
-                    Full coverage — this is what SAM saw in this photo: a visible
+                    Full coverage — this is what SAM saw in this{" "}
+                    {selected.media_url.match(/\.mp4$/i) ? "clip" : "photo"}: a visible
                     count, not proof of stock. A recount or a clearer photo is
                     still the safe check before any inventory change.
                   </p>
@@ -667,6 +774,78 @@ export default function App() {
                     </button>
                   </div>
                 )}
+                {selected?.audit_case && selected.audit_case.state === "needs_review" && (
+                  <div className="mt-6 border-t border-slate-200 pt-4">
+                    <h3 className="mb-1 text-sm font-semibold">Human approval</h3>
+                    <p className="mb-3 text-sm text-slate-600">
+                      Approving sets the simulated ERP expected quantity for shelf{" "}
+                      {selected.shelf_id} from {selected.expected_qty} to the quantity below.
+                      This changes the simulated record only — not true stock. Only approve
+                      a number you verified by recount; the model never proposes a quantity.
+                    </p>
+                    <div className="flex flex-wrap items-end gap-3">
+                      <div>
+                        <label htmlFor="approve-qty" className="mb-1 block text-sm font-medium">
+                          Corrected quantity
+                        </label>
+                        <input
+                          id="approve-qty"
+                          type="number"
+                          min={0}
+                          step={1}
+                          value={approveQty}
+                          onChange={(e) => setApproveQty(e.target.value)}
+                          className="w-32 border border-slate-400 bg-white px-3 py-2 text-sm tabular-nums"
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        disabled={deciding}
+                        onClick={() => decide("approve")}
+                        className="bg-slate-900 px-5 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+                      >
+                        Approve correction
+                      </button>
+                    </div>
+                    <div className="mt-3 flex flex-wrap items-end gap-3">
+                      <div>
+                        <label htmlFor="reject-reason" className="mb-1 block text-sm font-medium">
+                          Rejection reason
+                        </label>
+                        <input
+                          id="reject-reason"
+                          type="text"
+                          value={rejectReason}
+                          onChange={(e) => setRejectReason(e.target.value)}
+                          placeholder="Why this case is rejected"
+                          className="w-64 border border-slate-400 bg-white px-3 py-2 text-sm placeholder:text-slate-500"
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        disabled={deciding}
+                        onClick={() => decide("reject")}
+                        className="border border-slate-400 bg-white px-5 py-2 text-sm font-semibold text-slate-900 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+                      >
+                        Reject case
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {selected?.audit_case && selected.audit_case.state === "approved" && (
+                  <p className="mt-6 border-t border-slate-200 pt-4 text-sm">
+                    Approved: expected quantity set to {selected.audit_case.approved_qty} (was{" "}
+                    {selected.audit_case.recommendation?.deterministic?.expected_qty}). The case
+                    snapshot above still shows the original numbers — the decision is a new
+                    fact, not an edit of the evidence.
+                  </p>
+                )}
+                {selected?.audit_case && selected.audit_case.state === "rejected" && (
+                  <p className="mt-6 border-t border-slate-200 pt-4 text-sm">
+                    Rejected: {selected.audit_case.reject_reason ?? "no reason recorded"}.
+                    Inventory untouched.
+                  </p>
+                )}
                 {selectedInventory && selected && (
                   <p className="mt-4 text-xs text-slate-500">
                     Expected quantity above comes from the simulated ERP record for shelf{" "}
@@ -679,8 +858,9 @@ export default function App() {
             <section aria-label="Scan history and audit" className="mt-6 bg-white p-5 shadow-sm">
               <h2 className="mb-1 text-lg font-semibold">Scan history</h2>
               <p className="mb-4 text-sm text-slate-600">
-                Select a scan to inspect its media, comparison, and audit case. Approve/reject
-                controls arrive with Slice 6; until then every case stays open for review.
+                Select a scan to inspect its media, comparison, and audit case. Approve or
+                reject a case from its comparison panel; every decision is recorded as an
+                audit event.
               </p>
               {scans.length === 0 ? (
                 <p className="text-sm text-slate-600">No scans yet.</p>
@@ -693,6 +873,7 @@ export default function App() {
                       <th className="px-3 py-2 font-semibold">Status</th>
                       <th className="px-3 py-2 font-semibold">Coverage</th>
                       <th className="px-3 py-2 font-semibold">Review</th>
+                      <th className="px-3 py-2 font-semibold">Case</th>
                       <th className="px-3 py-2 font-semibold tabular-nums">Visible</th>
                       <th className="px-3 py-2 font-semibold tabular-nums">Expected</th>
                     </tr>
@@ -709,12 +890,140 @@ export default function App() {
                         <td className="px-3 py-2">{scan.status}</td>
                         <td className="px-3 py-2">{scan.coverage_status}</td>
                         <td className="px-3 py-2">{scan.needs_review ? "Needs review" : "—"}</td>
+                        <td className="px-3 py-2">{scan.audit_case ? scan.audit_case.state : "—"}</td>
                         <td className="px-3 py-2 tabular-nums">{scan.visible_qty ?? "—"}</td>
                         <td className="px-3 py-2 tabular-nums">{scan.expected_qty}</td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
+              )}
+            </section>
+
+            <section aria-label="Evaluation metrics" className="mt-6 bg-white p-5 shadow-sm">
+              <h2 className="mb-1 text-lg font-semibold">Evaluation metrics</h2>
+              <p className="mb-4 text-sm text-slate-600">
+                Measured numbers, not asserted ones. Live aggregates come from this
+                database; the evaluation run below is the last labeled harness run
+                (synthetic fixtures unless its label says otherwise).
+              </p>
+              {metrics && (
+                <dl className="space-y-2 text-sm">
+                  <div className="flex justify-between gap-4 border-b border-slate-200 pb-2">
+                    <dt className="text-slate-600">Scans analyzed (live)</dt>
+                    <dd className="font-medium tabular-nums">{metrics.live.analyzedScans}</dd>
+                  </div>
+                  <div className="flex justify-between gap-4 border-b border-slate-200 pb-2">
+                    <dt className="text-slate-600">Video scans (live)</dt>
+                    <dd className="font-medium tabular-nums">{metrics.live.videoScans}</dd>
+                  </div>
+                  <div className="flex justify-between gap-4 border-b border-slate-200 pb-2">
+                    <dt className="text-slate-600">Average SAM latency (live)</dt>
+                    <dd className="font-medium tabular-nums">
+                      {metrics.live.avgLatencyMs != null
+                        ? `${(metrics.live.avgLatencyMs / 1000).toFixed(1)}s`
+                        : "—"}
+                    </dd>
+                  </div>
+                  <div className="flex justify-between gap-4 border-b border-slate-200 pb-2">
+                    <dt className="text-slate-600">Cases by state (live)</dt>
+                    <dd className="font-medium">
+                      {metrics.live.casesByState.length > 0
+                        ? metrics.live.casesByState.map((c) => `${c.state}: ${c.n}`).join(" · ")
+                        : "—"}
+                    </dd>
+                  </div>
+                </dl>
+              )}
+              {metrics?.evalRun ? (
+                <div className="mt-5">
+                  <h3 className="mb-1 text-sm font-semibold">
+                    Last evaluation run — {metrics.evalRun.run.label}
+                  </h3>
+                  <p className="mb-3 text-xs text-slate-500">
+                    {new Date(metrics.evalRun.run.date).toLocaleString()} · {metrics.evalRun.run.n}{" "}
+                    scans · {metrics.evalRun.run.note}
+                  </p>
+                  <dl className="space-y-2 text-sm">
+                    <div className="flex justify-between gap-4 border-b border-slate-200 pb-2">
+                      <dt className="text-slate-600">Exact-confident accuracy</dt>
+                      <dd className="font-semibold tabular-nums">
+                        {metrics.evalRun.metrics.exactConfident.hit}/
+                        {metrics.evalRun.metrics.exactConfident.of}
+                      </dd>
+                    </div>
+                    <div className="flex justify-between gap-4 border-b border-slate-200 pb-2">
+                      <dt className="text-slate-600">Count match (any coverage)</dt>
+                      <dd className="font-medium tabular-nums">
+                        {metrics.evalRun.metrics.countMatch.hit}/{metrics.evalRun.metrics.countMatch.of}
+                      </dd>
+                    </div>
+                    <div className="flex justify-between gap-4 border-b border-slate-200 pb-2">
+                      <dt className="text-slate-600">Uncertain-flag recall</dt>
+                      <dd className="font-medium tabular-nums">
+                        {metrics.evalRun.metrics.uncertainFlagRecall.hit}/
+                        {metrics.evalRun.metrics.uncertainFlagRecall.of}
+                      </dd>
+                    </div>
+                    <div className="flex justify-between gap-4 border-b border-slate-200 pb-2">
+                      <dt className="text-slate-600">Confident-wrong (numeric truth)</dt>
+                      <dd className="font-medium tabular-nums">
+                        {metrics.evalRun.metrics.confidentWrong.hit}/
+                        {metrics.evalRun.metrics.confidentWrong.of}
+                        {metrics.evalRun.metrics.confidentWrong.files.length > 0 &&
+                          ` (${metrics.evalRun.metrics.confidentWrong.files.join(", ")})`}
+                      </dd>
+                    </div>
+                    <div className="flex justify-between gap-4 border-b border-slate-200 pb-2">
+                      <dt className="text-slate-600">Cases created / analyzed</dt>
+                      <dd className="font-medium tabular-nums">
+                        {metrics.evalRun.metrics.caseCreationRate.hit}/
+                        {metrics.evalRun.metrics.caseCreationRate.of}
+                      </dd>
+                    </div>
+                    <div className="flex justify-between gap-4">
+                      <dt className="text-slate-600">Video scans with cases</dt>
+                      <dd className="font-medium tabular-nums">
+                        {metrics.evalRun.metrics.videoCaseLive.hit}/
+                        {metrics.evalRun.metrics.videoCaseLive.of}
+                      </dd>
+                    </div>
+                  </dl>
+                  <table className="mt-4 w-full border-collapse text-left text-sm">
+                    <thead>
+                      <tr className="border-b border-slate-300">
+                        <th className="px-3 py-2 font-semibold">File</th>
+                        <th className="px-3 py-2 font-semibold tabular-nums">Truth</th>
+                        <th className="px-3 py-2 font-semibold tabular-nums">Visible</th>
+                        <th className="px-3 py-2 font-semibold">Coverage</th>
+                        <th className="px-3 py-2 font-semibold">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {metrics.evalRun.cases.map((c) => {
+                        const mismatch =
+                          typeof c.truth === "number" && c.visible !== c.truth;
+                        return (
+                          <tr
+                            key={c.file}
+                            className={`border-b border-slate-200 last:border-0 ${mismatch ? "bg-amber-50" : ""}`}
+                          >
+                            <td className="px-3 py-2">{c.file}</td>
+                            <td className="px-3 py-2 tabular-nums">{c.truth ?? "uncertain"}</td>
+                            <td className="px-3 py-2 tabular-nums">{c.visible ?? "—"}</td>
+                            <td className="px-3 py-2">{c.coverage ?? "—"}</td>
+                            <td className="px-3 py-2">{c.investigation_action ?? "—"}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="mt-4 text-sm text-slate-600">
+                  No evaluation run recorded yet. Run spec/eval/run-eval-s6.mjs against a
+                  dev server to generate server/eval-results.json.
+                </p>
               )}
             </section>
           </>

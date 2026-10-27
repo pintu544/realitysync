@@ -67,19 +67,19 @@ Return ONLY a JSON object with exactly these fields:
 - needs_review: boolean, true unless the evidence fully supports a confident conclusion.`;
 
 function validateInvestigation(raw: unknown): Investigation {
-  if (typeof raw !== "object" || raw === null) throw new Error("investigation is not an object");
+  if (typeof raw !== "object" || raw === null) throw new SparkParseError("investigation is not an object");
   const r = raw as Record<string, unknown>;
   if (typeof r.summary !== "string" || r.summary.trim() === "") {
-    throw new Error("investigation summary missing");
+    throw new SparkParseError("investigation summary missing");
   }
   if (!Array.isArray(r.findings) || !r.findings.every((f) => typeof f === "string")) {
-    throw new Error("investigation findings malformed");
+    throw new SparkParseError("investigation findings malformed");
   }
   if (typeof r.recommended_action !== "string" || !(RECOMMENDED_ACTIONS as string[]).includes(r.recommended_action)) {
-    throw new Error("investigation recommended_action invalid");
+    throw new SparkParseError("investigation recommended_action invalid");
   }
   if (typeof r.needs_review !== "boolean") {
-    throw new Error("investigation needs_review missing");
+    throw new SparkParseError("investigation needs_review missing");
   }
   return {
     summary: r.summary,
@@ -93,6 +93,20 @@ export class SparkError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "SparkError";
+  }
+}
+
+// Parse/schema failures only: a distinct class so the retry below can
+// match exactly this failure kind. (Slice 6 W2: the old regex predicate
+// `/valid JSON|malformed|missing|invalid/` also matched the no-key
+// error "Meta API not configured (MODEL_API_KEY missing)" and fired a
+// second throwaway call — harmless, no network, but a wasted attempt
+// that muddied the failure. The not-configured error is a plain
+// SparkError and is never retried now.)
+export class SparkParseError extends SparkError {
+  constructor(message: string) {
+    super(message);
+    this.name = "SparkParseError";
   }
 }
 
@@ -144,13 +158,15 @@ async function callOnce(evidence: InvestigationEvidence): Promise<Investigation>
     console.error(
       `Spark JSON parse failed (finish_reason: ${data.choices?.[0]?.finish_reason ?? "unknown"}): ${candidate.slice(0, 300)}`,
     );
-    throw new SparkError("LLM did not return valid JSON");
+    throw new SparkParseError("LLM did not return valid JSON");
   }
   return validateInvestigation(parsed);
 }
 
 // One parse/schema retry, then the caller degrades fail-closed (case with
 // investigation null + honest error note — never a fabricated explanation).
+// Only SparkParseError retries: a completed call that returned unusable
+// JSON/schema. Provider errors and the not-configured error throw at once.
 export async function investigateDiscrepancy(
   evidence: InvestigationEvidence,
 ): Promise<{ investigation: Investigation; latencyMs: number }> {
@@ -159,7 +175,7 @@ export async function investigateDiscrepancy(
     const investigation = await callOnce(evidence);
     return { investigation, latencyMs: Date.now() - started };
   } catch (err) {
-    if (err instanceof SparkError && /valid JSON|malformed|missing|invalid/.test(err.message)) {
+    if (err instanceof SparkParseError) {
       const investigation = await callOnce(evidence);
       return { investigation, latencyMs: Date.now() - started };
     }

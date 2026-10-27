@@ -6,5 +6,14 @@
   "eval-empty.png": 0,
   "eval-3.jpg": 3,
   "eval-partial.png": "6 physical (5 full + 1 edge-clipped) -> count uncertain, clipped box may be missed",
-  "eval-partial-labeled.png": "6 physical (5 full + 1 edge-clipped) -> partial branch, needs_review"
+  "eval-partial-labeled.png": "6 physical (5 full + 1 edge-clipped) -> partial branch, needs_review",
+  "stacked-row.png": 3,
+  "stacked-labeled.png": 3,
+  "small-single.png": 1,
+  "small-sparse.png": 4,
+  "small-dense.png": 12,
+  "dense-12.png": 12,
+  "dense-large.png": 12,
+  "sparse-12.png": 12,
+  "labeled-12.png": 12
 }

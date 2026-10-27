@@ -79,6 +79,9 @@ export interface SamVideoResult {
   frameHeight: number;
   framesWithBoxes: number;
   maxFrame: number;
+  // Total clip frames from the MP4 stts table (Slice 6 denominator),
+  // null when unparseable — the caller then falls back to maxFrame + 1.
+  totalFrames: number | null;
   // Total per-frame box records before objectId dedupe (auditability:
   // the video analogue of the image path's raw_box_count).
   boxRecords: number;
@@ -126,7 +129,75 @@ export function mp4Dimensions(buf: Buffer): { width: number; height: number } | 
   return walk(0, buf.length, 0);
 }
 
-// Slice 4 video path. Uploads the MP4 to Meta's Files API (purpose
+// Slice 6: total frame count of the video track, from the stts sample
+// table (sum of sample_counts). Best-effort: null when the boxes are
+// absent or malformed — the caller falls back to the Slice 4 span
+// denominator. Only the video (hdlr 'vide') track counts; audio tracks
+// are ignored.
+export function mp4TotalFrames(buf: Buffer): number | null {
+  function readBox(i: number, end: number): { size: number; type: string; header: number; boxEnd: number } | null {
+    if (i + 8 > end) return null;
+    const size = buf.readUInt32BE(i);
+    const type = buf.subarray(i + 4, i + 8).toString("ascii");
+    let header = 8;
+    let boxEnd: number;
+    if (size === 1) {
+      if (i + 16 > end) return null;
+      boxEnd = i + Number(buf.readBigUInt64BE(i + 8));
+      header = 16;
+    } else if (size === 0) {
+      boxEnd = end;
+    } else {
+      boxEnd = i + size;
+    }
+    if (boxEnd > end) return null;
+    return { size, type, header, boxEnd };
+  }
+  function findBoxes(start: number, end: number, want: string): Array<{ content: number; boxEnd: number; header: number }> {
+    const out: Array<{ content: number; boxEnd: number; header: number }> = [];
+    let i = start;
+    while (i + 8 <= end) {
+      const box = readBox(i, end);
+      if (!box) return out;
+      if (box.type === want) out.push({ content: i + box.header, boxEnd: box.boxEnd, header: box.header });
+      i = box.boxEnd;
+    }
+    return out;
+  }
+  const moovs = findBoxes(0, buf.length, "moov");
+  for (const moov of moovs) {
+    for (const trak of findBoxes(moov.content, moov.boxEnd, "trak")) {
+      let isVideo = false;
+      for (const mdia of findBoxes(trak.content, trak.boxEnd, "mdia")) {
+        for (const hdlr of findBoxes(mdia.content, mdia.boxEnd, "hdlr")) {
+          // hdlr: version/flags (4) + pre_defined (4) + handler_type (4).
+          if (hdlr.content + 12 <= hdlr.boxEnd && buf.subarray(hdlr.content + 8, hdlr.content + 12).toString("ascii") === "vide") {
+            isVideo = true;
+          }
+        }
+        if (!isVideo) continue;
+        for (const minf of findBoxes(mdia.content, mdia.boxEnd, "minf")) {
+          for (const stbl of findBoxes(minf.content, minf.boxEnd, "stbl")) {
+            for (const stts of findBoxes(stbl.content, stbl.boxEnd, "stts")) {
+              // stts: version/flags (4) + entry_count (4) + entries of
+              // (sample_count, sample_delta) × 8 bytes.
+              const p = stts.content;
+              if (p + 8 > stts.boxEnd) return null;
+              const entries = buf.readUInt32BE(p + 4);
+              if (p + 8 + entries * 8 > stts.boxEnd) return null;
+              let total = 0;
+              for (let e = 0; e < entries; e++) {
+                total += buf.readUInt32BE(p + 8 + e * 8);
+              }
+              return total > 0 ? total : null;
+            }
+          }
+        }
+      }
+    }
+  }
+  return null;
+}
 // user_data, verified live 2026-10-27), then calls sam-3.1 with an
 // input_video part carrying the returned file_id, and parses the stream
 // with parseVideoStream. Object ids are stable across frames of one
@@ -203,6 +274,7 @@ export async function analyzeVideo(filePath: string): Promise<SamVideoResult> {
     frameHeight: dims.height,
     framesWithBoxes: framesWith.size,
     maxFrame,
+    totalFrames: mp4TotalFrames(buf),
     boxRecords: recordsOfKind(result.records, "box").length,
   };
 }

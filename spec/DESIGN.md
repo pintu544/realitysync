@@ -199,8 +199,9 @@ create a second case.
   tracking (no longer refused).
 - `GET /api/inventory` — list all inventory records (Slice 2 addition for the inventory view).
 - `GET /api/inventory/:shelfId` — expected inventory record.
-- `POST /api/audits/:id/approve` — body `{ approvedQty }`; validates version, updates inventory + audit event atomically.
-- `POST /api/audits/:id/reject` — body `{ reason }`; records rejection event.
+- `POST /api/audits/:id/approve` — body `{ approvedQty }`; validates version, updates inventory + audit event atomically. (Slice 6: case must be `needs_review`, approvedQty a non-negative integer; stale version → 409 with recorded + current versions; already-decided → 409; invalid id → 400; unknown case → 404. Returns the decided case + updated inventory row.)
+- `POST /api/audits/:id/reject` — body `{ reason }`; records rejection event. (Slice 6: reason must be a non-empty string; case must be `needs_review`; inventory untouched. Returns the decided case.)
+- `GET /api/metrics` — live aggregates (scans by status/coverage, cases by state, average SAM latency) plus the last labeled evaluation run (`evalRun`, null when no run has been recorded). The evaluation run file is written by the eval harness, committed, and deployed with the server — metrics are measured, never asserted.
 - `GET /api/health` — `{ ok, provider: "meta", llmConfigured, metaConfigured, envWarning }` (same honesty shape as livedocs-meta). **Semantics (QA W2, pinned): `ok` is process health only; consumers MUST check `llmConfigured`/`metaConfigured`, not `ok`, to judge Meta readiness** — with all env vars missing, `ok` is still true and only the configured flags tell the truth.
 
 ## Video tracking (Slice 4, documented before verification)
@@ -247,6 +248,85 @@ per-frame dips to 4–5 at occlusion moments). Consequences, all
 implemented: zero-box video = `unknown` → `needs_review`, never zero
 stock; the UI advises a slow pan and says plainly that a static shot can
 return nothing. The demo video MUST be a slow pan, not a static shot.
+
+## In-flight investigation guard (Slice 6, S6.0 — mirrors Slice 4 W4)
+
+One investigation run per scan at a time, enforced server-side with an
+in-memory set of running scan ids owned by `investigate.ts`. The claim
+is synchronous (check-then-add with no await between, so two concurrent
+callers cannot both claim). `POST /api/scans/:id/investigate` while a
+run is active returns 409 ("investigation already running") instead of
+starting a second Muse Spark call for the same scan (Slice 5 QA W1:
+concurrent requests double-charged Meta while the unique index kept only
+one row). If a case row already exists when a second caller arrives, it
+is returned (the in-flight run will refresh it); otherwise the caller
+gets 409. The auto-creation path (analysis completion) claims through
+the same guard, so a manual `/investigate` racing auto-creation also
+gets 409 rather than a second model call. Sequential idempotency is
+unchanged: a completed investigation is returned without a new call.
+
+## Human approval + guarded correction (Slice 6, documented before coding)
+
+Case workflow states: `needs_review` → `approved` | `rejected`. No other
+transitions exist; an already-decided case answers 409 to a second
+decision. Approval is a HUMAN act on a HUMAN-entered quantity: the model
+proposes no quantity (Slice 5 schema has none), and the approve
+endpoint takes `approvedQty` from the request body. The UI prefills the
+input with the visible count as a convenience, but the human may enter
+any non-negative integer — the number is their verified judgment, and
+the panel says so plainly ("this changes the simulated ERP record
+only, not true stock").
+
+Version guard (the stale-approval rule): each audit case records the
+inventory `version` at creation time (`audit_cases.inventory_version`).
+Approval requires the recorded version to still equal the inventory
+row's current version; otherwise it answers 409 `stale inventory
+version` (with recorded + current versions in the response) and changes
+nothing. The check-then-update race is closed inside the transaction:
+the inventory UPDATE is conditional on the version (`... AND version =
+$expected`), so a version move between check and write updates zero
+rows and the whole transaction rolls back. A case created before
+version tracking (NULL recorded version) is refused as stale — re-scan
+instead of approving against an unknown base.
+
+Atomicity: approval runs in ONE database transaction (inventory update
++ version bump + case state/approved_qty + audit event). Any failure
+rolls everything back — a half-applied correction (record changed, case
+still open, or vice versa) cannot exist. The transaction helper lives
+on the `Db` abstraction (`withTransaction`): real Postgres takes a
+dedicated pool client (BEGIN/COMMIT/ROLLBACK); pg-mem cannot roll back
+DML through SQL (verified 2026-10-27: ROLLBACK is a no-op there), so
+its path snapshots with `mem.backup()` and restores on error — same
+guarantee, whole-database scope, dev-only. Rejection needs no version guard (it
+changes no inventory) but still writes its reason + event atomically
+with the state change; an empty reason is 400.
+
+Audit trail: `approved` events carry `{ approved_qty, previous_qty,
+inventory_version_before, inventory_version_after }`; `rejected` events
+carry `{ reason }`. The case's original deterministic snapshot
+(expected/visible/difference at case time) is never rewritten by a
+decision — the decision is a new fact appended to the case, not an edit
+of its evidence.
+
+## Video coverage denominator (Slice 6, decided with evidence)
+
+DECISION: the <80% rule's denominator is total clip frames (parsed
+from the MP4 `stts` sample count for the video track) whenever it is
+parseable AND the observed max frame lies inside the clip
+(`maxFrame < totalFrames`); otherwise it falls back to `maxFrame + 1`
+(frames spanned by detections, the Slice 4 rule). Rationale: the
+trailing-dropout gap (Slice 4 QA: boxes in frames 0–19 of a 40-frame
+clip read `full` under the span denominator) is exactly what a
+shelf-exits-frame clip produces, and the span denominator cannot see
+it. Assumption, stated plainly: SAM frame indices are clip frames.
+Evidence for it on our clips: full-span pan clips report
+`maxFrame + 1` ≈ clip frame count (Slice 4: 33/40, 40/40), i.e. SAM
+indexes the frames it was given, not a subsample. If a future clip
+shows sampled indices (maxFrame far below totalFrames while tracking
+is continuous), the rule degrades conservatively to `partial`, never
+to a confident wrong count — the failure direction is safe.
+`video_stats` records `totalFrames` and which denominator was used, so
+any metric can be recomputed from stored evidence.
 
 ## Key decisions
 - Deterministic counts, LLM explanations: the backend counts, Muse Spark only explains — so a wrong model sentence can never corrupt a number.

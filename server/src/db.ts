@@ -7,6 +7,10 @@ import { newDb } from "pg-mem";
 
 export interface Db {
   query: (text: string, params?: unknown[]) => Promise<{ rows: any[] }>;
+  // Runs fn inside one database transaction (BEGIN/COMMIT, ROLLBACK on
+  // error). Slice 6 approval needs this: inventory update + version
+  // bump + case state + audit event must land together or not at all.
+  withTransaction: <T>(fn: (tx: Db) => Promise<T>) => Promise<T>;
 }
 
 const MIGRATIONS: string[] = [
@@ -52,6 +56,10 @@ const MIGRATIONS: string[] = [
   )`,
   `ALTER TABLE scan_detections ADD COLUMN IF NOT EXISTS raw_box_count INTEGER`,
   `ALTER TABLE scan_detections ADD COLUMN IF NOT EXISTS video_stats JSONB`,
+  // Slice 6: inventory version recorded at case creation (stale-approval
+  // guard) + human reject reason on the case itself.
+  `ALTER TABLE audit_cases ADD COLUMN IF NOT EXISTS inventory_version INTEGER`,
+  `ALTER TABLE audit_cases ADD COLUMN IF NOT EXISTS reject_reason TEXT`,
 ];
 
 let db: Db | null = null;
@@ -71,14 +79,59 @@ export async function initDb(): Promise<Db> {
   }
   if (url) {
     const pool = new Pool({ connectionString: url });
-    db = { query: (text, params) => pool.query(text, params as any) };
+    const baseQuery = (text: string, params?: unknown[]) => pool.query(text, params as any);
+    db = {
+      query: baseQuery,
+      // A dedicated pool client for the whole transaction: Pool.query
+      // would grab a different client per statement and break atomicity.
+      withTransaction: async <T>(fn: (tx: Db) => Promise<T>): Promise<T> => {
+        const client = await pool.connect();
+        try {
+          await client.query("BEGIN");
+          const result = await fn({
+            query: (t, p) => client.query(t, p as any),
+            withTransaction: () => Promise.reject(new Error("nested transactions not supported")),
+          });
+          await client.query("COMMIT");
+          return result;
+        } catch (err) {
+          await client.query("ROLLBACK");
+          throw err;
+        } finally {
+          client.release();
+        }
+      },
+    };
     backend = "postgres";
   } else {
     const mem = newDb();
     const { Client } = mem.adapters.createPg();
     const client = new Client();
     await client.connect();
-    db = { query: (text, params) => client.query(text, params as any) };
+    const memQuery = (text: string, params?: unknown[]) => client.query(text, params as any);
+    db = {
+      query: memQuery,
+      // pg-mem's pg adapter does NOT roll back DML on ROLLBACK (verified
+      // 2026-10-27: a row inserted inside BEGIN survived ROLLBACK), so
+      // SQL transactions cannot provide atomicity here. Instead, snapshot
+      // with mem.backup() (O(1) restore point) and restore on error —
+      // true atomicity on this backend, same guarantee as the Postgres
+      // path, with one caveat: the snapshot covers the whole database,
+      // so concurrent writers during a transaction would also roll
+      // back. Dev-only, single-user demo: acceptable, and documented.
+      withTransaction: async <T>(fn: (tx: Db) => Promise<T>): Promise<T> => {
+        const backup = mem.backup();
+        try {
+          return await fn({
+            query: memQuery,
+            withTransaction: () => Promise.reject(new Error("nested transactions not supported")),
+          });
+        } catch (err) {
+          backup.restore();
+          throw err;
+        }
+      },
+    };
     backend = "pg-mem (dev only)";
   }
   for (const sql of MIGRATIONS) {

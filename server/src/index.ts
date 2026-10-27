@@ -9,7 +9,8 @@ import multer from "multer";
 import { dbBackend, initDb, type Db } from "./db.js";
 import { seedFixtures } from "./seed.js";
 import { runAnalysis, inFlightAnalyses } from "./analyze.js";
-import { ensureAuditCase, parseAuditCase } from "./investigate.js";
+import { ensureAuditCase, parseAuditCase, InvestigationInFlightError } from "./investigate.js";
+import { approveCase, rejectCase, DecisionError } from "./approve.js";
 
 const app = express();
 app.use(express.json());
@@ -233,7 +234,9 @@ function withDetections(row: Record<string, unknown>): Record<string, unknown> {
             scan_id: row.id,
             recommendation: row.case_recommendation,
             state: row.case_state,
-            approved_qty: null,
+            approved_qty: row.case_approved_qty ?? null,
+            inventory_version: row.case_inventory_version ?? null,
+            reject_reason: row.case_reject_reason ?? null,
             created_at: "",
           }),
   };
@@ -243,7 +246,7 @@ app.get("/api/scans", async (_req, res) => {
   const { rows } = await db.query(
     `SELECT s.*, i.shelf_id, i.sku, i.expected_qty,
        d.boxes, d.mask_count, d.latency_ms, d.error AS analysis_error, d.analyzed_at, d.raw_box_count, d.video_stats,
-       a.id AS case_id, a.recommendation AS case_recommendation, a.state AS case_state
+       a.id AS case_id, a.recommendation AS case_recommendation, a.state AS case_state, a.approved_qty AS case_approved_qty, a.inventory_version AS case_inventory_version, a.reject_reason AS case_reject_reason
      FROM scans s JOIN inventory i ON i.id = s.inventory_id
      LEFT JOIN scan_detections d ON d.scan_id = s.id
      LEFT JOIN audit_cases a ON a.scan_id = s.id
@@ -262,7 +265,7 @@ app.get("/api/scans/:id", async (req, res) => {
     ({ rows } = await db.query(
       `SELECT s.*, i.shelf_id, i.sku, i.expected_qty,
        d.boxes, d.mask_count, d.latency_ms, d.error AS analysis_error, d.analyzed_at, d.raw_box_count, d.video_stats,
-       a.id AS case_id, a.recommendation AS case_recommendation, a.state AS case_state
+       a.id AS case_id, a.recommendation AS case_recommendation, a.state AS case_state, a.approved_qty AS case_approved_qty, a.inventory_version AS case_inventory_version, a.reject_reason AS case_reject_reason
      FROM scans s JOIN inventory i ON i.id = s.inventory_id
      LEFT JOIN scan_detections d ON d.scan_id = s.id
      LEFT JOIN audit_cases a ON a.scan_id = s.id
@@ -334,12 +337,101 @@ app.post("/api/scans/:id/investigate", async (req, res) => {
     res.status(409).json({ error: "scan not analyzed yet" });
     return;
   }
-  const auditCase = await ensureAuditCase(db, req.params.id);
+  let auditCase;
+  try {
+    auditCase = await ensureAuditCase(db, req.params.id);
+  } catch (err) {
+    // Slice 6 S6.0: a run already in flight answers 409, never a second
+    // Muse Spark call for the same scan. Anything else is a plain 500 —
+    // never rethrown (Express 4 would let it kill the process).
+    if (err instanceof InvestigationInFlightError) {
+      res.status(409).json({ error: "investigation already running" });
+      return;
+    }
+    res.status(500).json({ error: "internal error" });
+    return;
+  }
   if (!auditCase) {
     res.status(500).json({ error: "could not load audit case" });
     return;
   }
   res.json({ audit_case: auditCase });
+});
+
+// Slice 6: human approval + guarded correction. The case id is a UUID
+// (same C1 rule as scan ids: validate shape, try/catch the queries).
+app.post("/api/audits/:id/approve", async (req, res) => {
+  if (!isUuid(req.params.id)) {
+    res.status(400).json({ error: "invalid audit id" });
+    return;
+  }
+  try {
+    const { auditCase, inventory } = await approveCase(db, req.params.id, req.body?.approvedQty);
+    res.json({ audit_case: auditCase, inventory });
+  } catch (err) {
+    if (err instanceof DecisionError) {
+      res.status(err.status).json({ error: err.message, ...(err.extra ?? {}) });
+      return;
+    }
+    res.status(500).json({ error: "internal error" });
+  }
+});
+
+app.post("/api/audits/:id/reject", async (req, res) => {
+  if (!isUuid(req.params.id)) {
+    res.status(400).json({ error: "invalid audit id" });
+    return;
+  }
+  try {
+    const { auditCase } = await rejectCase(db, req.params.id, req.body?.reason);
+    res.json({ audit_case: auditCase });
+  } catch (err) {
+    if (err instanceof DecisionError) {
+      res.status(err.status).json({ error: err.message, ...(err.extra ?? {}) });
+      return;
+    }
+    res.status(500).json({ error: "internal error" });
+  }
+});
+
+// Slice 6: evaluation metrics. Live aggregates come from the database;
+// the last labeled evaluation run comes from the harness-written file
+// (server/eval-results.json, committed + deployed with the server).
+// A missing file is an honest empty state, not an error.
+app.get("/api/metrics", async (_req, res) => {
+  try {
+    const scans = await db.query(
+      `SELECT status, coverage_status, COUNT(*)::int AS n FROM scans GROUP BY status, coverage_status`,
+    );
+    const cases = await db.query(`SELECT state, COUNT(*)::int AS n FROM audit_cases GROUP BY state`);
+    const latency = await db.query(
+      `SELECT AVG(latency_ms)::float AS avg_ms, COUNT(*)::int AS n FROM scan_detections WHERE latency_ms IS NOT NULL`,
+    );
+    const video = await db.query(
+      `SELECT COUNT(*)::int AS n FROM scans s JOIN scan_detections d ON d.scan_id = s.id WHERE d.video_stats IS NOT NULL`,
+    );
+    let evalRun: unknown = null;
+    try {
+      const raw = await import("node:fs/promises").then((fs) =>
+        fs.readFile(join(HERE, "..", "eval-results.json"), "utf8"),
+      );
+      evalRun = JSON.parse(raw);
+    } catch {
+      evalRun = null;
+    }
+    res.json({
+      live: {
+        scansByStatusCoverage: scans.rows,
+        casesByState: cases.rows,
+        avgLatencyMs: latency.rows[0]?.avg_ms ?? null,
+        analyzedScans: latency.rows[0]?.n ?? 0,
+        videoScans: video.rows[0]?.n ?? 0,
+      },
+      evalRun,
+    });
+  } catch {
+    res.status(500).json({ error: "internal error" });
+  }
 });
 
 // I1: unknown API routes answer JSON 404, never an HTML fallback. This

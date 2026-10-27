@@ -125,26 +125,32 @@ const MIME_BY_EXT: Record<string, string> = {
   ".mp4": "video/mp4",
 };
 
-// Video coverage (Slice 4, documented in DESIGN.md before coding):
-//   unknown  — zero tracked objects (a static-camera clip can return
-//              nothing at all; that is never read as "shelf is empty").
-//   partial  — boxes present in <80% of frames up to the max observed
-//              frame (tracking dropped out for part of the clip), or a
-//              representative box touches a frame border (within 2%), or
-//              two representative boxes overlap with IoU > 0.5.
-//   full     — otherwise.
-// Representative boxes are each object's first-seen frame box; per-frame
-// overlap detail is not retained (known limitation, Slice 6 watch item).
-// Only `full` yields a confident visible count, same as images.
+// Video coverage (Slice 4, denominator decided in Slice 6 — see
+// DESIGN.md): `unknown` when zero tracked objects; `partial` when
+// boxes appear in <80% of the denominator frames, or a representative
+// box touches a frame border (within 2%), or two representative boxes
+// overlap with IoU > 0.5; otherwise `full`. The denominator is total
+// clip frames when parseable AND the observed max frame lies inside
+// the clip; otherwise frames spanned by detections (maxFrame + 1).
+// The guard matters: if SAM ever indexed a subsample instead of clip
+// frames, maxFrame could exceed the clip length, and the span fallback
+// keeps the math sane.
 export function classifyVideoCoverage(
   boxes: SamVideoBox[],
   width: number,
   height: number,
   framesWithBoxes: number,
   maxFrame: number,
+  totalFrames?: number | null,
 ): Coverage {
   if (boxes.length === 0) return "unknown";
-  const total = maxFrame + 1;
+  const total =
+    totalFrames !== null &&
+    totalFrames !== undefined &&
+    totalFrames > 0 &&
+    maxFrame < totalFrames
+      ? totalFrames
+      : maxFrame + 1;
   if (total > 0 && framesWithBoxes / total < 0.8) return "partial";
   const marginX = 0.02 * width;
   const marginY = 0.02 * height;
@@ -264,11 +270,17 @@ async function runVideoAnalysis(db: Db, scanId: string, filePath: string): Promi
     result.frameHeight,
     result.framesWithBoxes,
     result.maxFrame,
+    result.totalFrames,
   );
   const videoStats = {
     framesWithBoxes: result.framesWithBoxes,
     maxFrame: result.maxFrame,
     uniqueObjects: filtered.length,
+    // Slice 6: which denominator the coverage math used, so any metric
+    // can be recomputed from stored evidence.
+    totalFrames: result.totalFrames,
+    denominator:
+      result.totalFrames !== null && result.maxFrame < result.totalFrames ? "clip" : "span",
   };
   await db.query("DELETE FROM scan_detections WHERE scan_id = $1", [scanId]);
   await db.query(

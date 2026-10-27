@@ -37,6 +37,11 @@ export interface AuditCase {
   recommendation: Record<string, unknown> | null;
   state: string;
   approved_qty: number | null;
+  // Inventory version recorded at case creation (Slice 6 stale-approval
+  // guard). NULL for cases created before version tracking — those are
+  // refused as stale rather than approved against an unknown base.
+  inventory_version: number | null;
+  reject_reason: string | null;
   created_at: string;
 }
 
@@ -48,13 +53,29 @@ export function parseAuditCase(row: Record<string, unknown> | null | undefined):
     recommendation: (parseJson(row.recommendation) as Record<string, unknown> | null) ?? null,
     state: String(row.state ?? "needs_review"),
     approved_qty: (row.approved_qty as number | null) ?? null,
+    inventory_version: (row.inventory_version as number | null) ?? null,
+    reject_reason: (row.reject_reason as string | null) ?? null,
     created_at: String(row.created_at ?? ""),
   };
 }
 
+// In-flight investigation guard (Slice 6 S6.0, mirrors Slice 4 W4 for
+// analysis). One investigation run per scan at a time: a second caller
+// while a run is active gets the existing case row if one exists, else
+// InvestigationInFlightError (the endpoint maps it to 409) — never a
+// second Muse Spark call for the same scan.
+export const inFlightInvestigations = new Set<string>();
+
+export class InvestigationInFlightError extends Error {
+  constructor() {
+    super("investigation already running");
+    this.name = "InvestigationInFlightError";
+  }
+}
+
 async function loadScan(db: Db, scanId: string): Promise<Record<string, unknown> | null> {
   const { rows } = await db.query(
-    `SELECT s.*, i.shelf_id, i.sku, i.expected_qty,
+    `SELECT s.*, i.shelf_id, i.sku, i.expected_qty, i.id AS inventory_id, i.version AS inventory_version,
        d.boxes, d.mask_count, d.latency_ms, d.raw_box_count, d.video_stats
      FROM scans s JOIN inventory i ON i.id = s.inventory_id
      LEFT JOIN scan_detections d ON d.scan_id = s.id
@@ -122,10 +143,32 @@ function buildEvidence(scan: Record<string, unknown>): InvestigationEvidence {
 
 // Creates or refreshes the audit case for an analyzed scan. Returns null
 // for pending/failed scans (no evidence to investigate) and for unknown
-// scans. Never throws to the caller: a Spark failure is recorded on the
-// case itself, and a DB failure is logged, so a case problem can never
-// flip a scan back out of `analyzed`.
+// scans. Never throws to the caller, EXCEPT InvestigationInFlightError
+// when another investigation run is already active for this scan (the
+// endpoint maps that to 409): a Spark failure is recorded on the case
+// itself, and a DB failure is logged, so a case problem can never flip a
+// scan back out of `analyzed`.
 export async function ensureAuditCase(db: Db, scanId: string): Promise<AuditCase | null> {
+  // Synchronous claim (no await between has() and add()): two concurrent
+  // callers cannot both claim the same scan.
+  if (inFlightInvestigations.has(scanId)) {
+    try {
+      const { rows } = await db.query("SELECT * FROM audit_cases WHERE scan_id = $1", [scanId]);
+      if (rows.length > 0) return parseAuditCase(rows[0]);
+    } catch {
+      // Fall through to the 409 below.
+    }
+    throw new InvestigationInFlightError();
+  }
+  inFlightInvestigations.add(scanId);
+  try {
+    return await ensureAuditCaseInner(db, scanId);
+  } finally {
+    inFlightInvestigations.delete(scanId);
+  }
+}
+
+async function ensureAuditCaseInner(db: Db, scanId: string): Promise<AuditCase | null> {
   let scan: Record<string, unknown> | null;
   try {
     scan = await loadScan(db, scanId);
@@ -227,8 +270,8 @@ export async function ensureAuditCase(db: Db, scanId: string): Promise<AuditCase
     const caseId = randomUUID();
     try {
       await db.query(
-        "INSERT INTO audit_cases (id, scan_id, recommendation, state, approved_qty) VALUES ($1, $2, $3, 'needs_review', NULL)",
-        [caseId, scanId, JSON.stringify(recommendation)],
+        "INSERT INTO audit_cases (id, scan_id, recommendation, state, approved_qty, inventory_version) VALUES ($1, $2, $3, 'needs_review', NULL, $4)",
+        [caseId, scanId, JSON.stringify(recommendation), scan.inventory_version ?? null],
       );
     } catch {
       // Lost the insert race despite the re-check (two writers between
