@@ -6,3 +6,6 @@ dist/
 .DS_Store
 server/uploads/
 spec/eval/frames/
+
+.deploy-staging/
+realitysync-azure.zip
