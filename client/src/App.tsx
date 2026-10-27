@@ -616,7 +616,7 @@ export default function App() {
                 )}
               </section>
 
-              <section aria-label="Comparison and investigation" className="bg-white p-5 shadow-sm">
+              <section aria-label="Comparison" className="bg-white p-5 shadow-sm">
                 <h2 className="mb-4 text-lg font-semibold">Comparison</h2>
                 {selected ? (
                   <dl className="space-y-3 text-sm">
@@ -707,6 +707,16 @@ export default function App() {
                     still the safe check before any inventory change.
                   </p>
                 )}
+                {selectedInventory && selected && (
+                  <p className="mt-4 text-xs text-slate-500">
+                    Expected quantity above comes from the simulated ERP record for shelf{" "}
+                    {selectedInventory.shelf_id} (version {selectedInventory.version}).
+                  </p>
+                )}
+              </section>
+            </div>
+            <section aria-label="AI investigation and human approval" className="mt-6 bg-white p-5 shadow-sm">
+              <h2 className="mb-1 text-lg font-semibold">AI investigation and human approval</h2>
                 <h3 className="mb-1 mt-6 text-sm font-semibold">AI investigation</h3>
                 {!selected || selected.status === "pending" ? (
                   <p className="text-sm text-slate-600">
@@ -863,14 +873,8 @@ export default function App() {
                     Inventory untouched.
                   </p>
                 )}
-                {selectedInventory && selected && (
-                  <p className="mt-4 text-xs text-slate-500">
-                    Expected quantity above comes from the simulated ERP record for shelf{" "}
-                    {selectedInventory.shelf_id} (version {selectedInventory.version}).
-                  </p>
-                )}
-              </section>
-            </div>
+            </section>
+
 
             <section aria-label="Scan history and audit" className="mt-6 bg-white p-5 shadow-sm">
               <h2 className="mb-1 text-lg font-semibold">Scan history</h2>

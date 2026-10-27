@@ -6,7 +6,32 @@ Meta Global AI Developer Hackathon — Indie Dev Track, "Build for Your World".
 
 ## Status
 
-Slice 3 done (SAM 3.1 wired to scans with async analysis, numbered overlays, coverage full/partial/unknown → needs_review, vertical-split merge, validated on 8 synthetic cases in `spec/eval-s3.md` — including the documented blind spot that SAM silently missing flat boxes can still read `full`). Slice 4 next: video tracking (photo fallback decision point). See `spec/` for the contract: `GRILL.md`, `SPEC.md`, `DESIGN.md`, `TASKS.md`, `research.md`.
+Slices 1–6 done and QA-closed (each with a fresh adversarial QA gate).
+Slice 7 (release candidate) in progress: S7.0 QA carry-over done
+(decided cases immutable to re-investigation; metrics blind-spot caveat).
+Deploy (S7.1) is BLOCKED on a production `DATABASE_URL` — see TASKS.md.
+Captured demo outputs: `spec/demo-captures/CAPTURES.md`. See `spec/` for the
+contract: `GRILL.md`, `SPEC.md`, `DESIGN.md`, `TASKS.md`, `research.md`.
+
+## What is real, what is simulated, what is incomplete
+
+- **Real Meta functionality:** SAM 3.1 segmentation (photo + video
+  tracking) and Muse Spark investigation, both via the Meta Model API
+  (`https://api.meta.ai/v1`), verified live against synthetic fixtures.
+- **Mocked ERP:** the "ERP record" is a simulated inventory table in the
+  app's own database, seeded with shelf A-01 / BOX-RED / 12. Approvals
+  change this simulated record only — never true stock, never a real ERP.
+- **Incomplete / open items:** production deploy (blocked on
+  `DATABASE_URL`); real-photo/video evaluation (awaiting real warehouse
+  photos — all accuracy numbers to date are synthetic-fixture evidence
+  only and must never be quoted as real-shelf accuracy); uploaded Meta
+  video files are not deleted after analysis (no documented Files API
+  delete shape); video scans show a count but no numbered overlays.
+- **Known honest limits:** SAM can silently miss objects, and a silent
+  miss leaves no signal — a confident count can still be wrong (see the
+  eval-partial.png blind-spot case in `spec/eval-s6.md` and the caveat on
+  the metrics page). Coverage `full` means "what SAM saw in this photo",
+  not proof of stock.
 
 ## Layout
 

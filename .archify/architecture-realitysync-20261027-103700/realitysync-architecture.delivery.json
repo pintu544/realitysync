@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "faaa4939-83a7-4733-b2cb-e173bd73d03b",
+  "status": "current",
+  "command": "deliver",
+  "type": "architecture",
+  "input": "/home/hatch/workspace/realitysync/.archify/architecture-realitysync-20261027-103700/candidate.json",
+  "output": "/home/hatch/workspace/realitysync/.archify/architecture-realitysync-20261027-103700/realitysync-architecture.html",
+  "specification": {
+    "sha256": "fd8f54178aaaf255d393121d5d039b3cb7cedbc0b7ea7afcd0fd81cb2b1a57b7",
+    "bytes": 5653
+  },
+  "artifact": {
+    "sha256": "9cf3651a6038d8ad8abfe56d28e75f58514f3e5a15e3b4193b180e63c8d4c498",
+    "bytes": 843922
+  }
+}

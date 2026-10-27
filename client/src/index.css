@@ -1,5 +1,14 @@
 @import "tailwindcss";
 
+/* Craft floor: prose measure 65–75ch (operate.md). Data and compact UI
+   stay dense; only paragraph prose is capped. 65ch keeps rendered lines
+   under 80 characters at text-sm sizes, where average glyphs run narrower
+   than 1ch. text-wrap: pretty avoids single-word last lines. */
+main p {
+  max-width: 65ch;
+  text-wrap: pretty;
+}
+
 /* Browser surfaces carry the design too (craft floor): selection, focus,
    caret and scrollbars use the page palette, not browser defaults. */
 ::selection {

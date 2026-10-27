@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "finalize",
+  "status": "pass",
+  "type": "architecture",
+  "quality": "showcase",
+  "specification": {
+    "path": "/home/hatch/workspace/realitysync/.archify/architecture-realitysync-20261027-103700/candidate.json",
+    "sha256": "fd8f54178aaaf255d393121d5d039b3cb7cedbc0b7ea7afcd0fd81cb2b1a57b7",
+    "bytes": 5653
+  },
+  "artifact": {
+    "path": "/home/hatch/workspace/realitysync/.archify/architecture-realitysync-20261027-103700/realitysync-architecture.html",
+    "sha256": "9cf3651a6038d8ad8abfe56d28e75f58514f3e5a15e3b4193b180e63c8d4c498",
+    "bytes": 843922
+  },
+  "gates": {
+    "validate": "pass",
+    "deliver": "pass",
+    "check": "pass",
+    "browser-check": "pass"
+  },
+  "diagnostics": [],
+  "diagnosticSummary": {
+    "total": 0,
+    "shown": 0,
+    "truncated": false
+  },
+  "evidence": {
+    "receipt": "/home/hatch/workspace/realitysync/.archify/architecture-realitysync-20261027-103700/review-2/realitysync-architecture.finalize.json",
+    "summaryReceipt": "/home/hatch/workspace/realitysync/.archify/architecture-realitysync-20261027-103700/review-2/realitysync-architecture.finalize-summary.json",
+    "browserCheckReceipt": "/home/hatch/workspace/realitysync/.archify/architecture-realitysync-20261027-103700/review-2/realitysync-architecture.browser-check.json"
+  },
+  "update": {
+    "status": "current",
+    "installedVersion": "3.2.0",
+    "availableVersion": "3.2.0",
+    "releaseNotes": null,
+    "checkedAt": "2026-10-26T17:03:43.173Z",
+    "source": "cache",
+    "noticeRequired": false,
+    "noticeText": null
+  },
+  "visualReview": "not-requested",
+  "durationMs": 6998,
+  "browserCheck": {
+    "requested": true,
+    "ran": true
+  }
+}

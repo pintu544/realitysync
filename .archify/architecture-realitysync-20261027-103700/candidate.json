@@ -1,0 +1,252 @@
+{
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Azure single service \u2014 F1, Central India (planned; deploy blocked on DATABASE_URL)",
+      "wraps": [
+        "client",
+        "server",
+        "uploads"
+      ]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "items": [
+        "Upload a shelf photo or slow-pan video; SAM counts visible cartons",
+        "Code compares the count against the simulated ERP record",
+        "Muse Spark investigates from structured evidence only",
+        "A human approves (version-guarded, atomic) or rejects with a reason"
+      ],
+      "title": "Main flow"
+    },
+    {
+      "dot": "emerald",
+      "items": [
+        "The ERP record is simulated \u2014 approvals never touch true stock",
+        "Coverage full means what SAM saw, not proof of stock",
+        "Silent SAM misses leave no signal; the blind spot is documented",
+        "All accuracy numbers to date are synthetic-fixture evidence only"
+      ],
+      "title": "Honesty boundaries"
+    },
+    {
+      "dot": "rose",
+      "items": [
+        "Production deploy blocked on DATABASE_URL (no $0 Postgres found)",
+        "Uploaded Meta video files are never deleted (no delete shape)",
+        "Video scans show a count but no numbered overlays"
+      ],
+      "title": "Open items"
+    }
+  ],
+  "components": [
+    {
+      "id": "user",
+      "label": "Warehouse staff / judge",
+      "pos": [
+        40,
+        190
+      ],
+      "size": [
+        150,
+        60
+      ],
+      "sublabel": "Browser",
+      "type": "external"
+    },
+    {
+      "id": "client",
+      "label": "Client (React 19 + Vite)",
+      "pos": [
+        250,
+        190
+      ],
+      "size": [
+        165,
+        60
+      ],
+      "sources": [
+        {
+          "label": "AI investigation panel",
+          "line": 710,
+          "path": "client/src/App.tsx"
+        },
+        {
+          "label": "Evaluation metrics section",
+          "line": 920,
+          "path": "client/src/App.tsx"
+        }
+      ],
+      "sublabel": "Upload, overlays, approval, metrics",
+      "type": "frontend"
+    },
+    {
+      "id": "server",
+      "label": "API server (Express + TS)",
+      "pos": [
+        480,
+        190
+      ],
+      "size": [
+        160,
+        60
+      ],
+      "sources": [
+        {
+          "label": "POST /investigate route",
+          "line": 322,
+          "path": "server/src/index.ts"
+        },
+        {
+          "label": "POST approve route",
+          "line": 365,
+          "path": "server/src/index.ts"
+        },
+        {
+          "end_line": 484,
+          "label": "Single-service dist serving",
+          "line": 479,
+          "path": "server/src/index.ts"
+        }
+      ],
+      "sublabel": "Upload \u2192 analyze \u2192 investigate \u2192 approve",
+      "type": "backend"
+    },
+    {
+      "id": "db",
+      "label": "PostgreSQL (production)",
+      "pos": [
+        480,
+        40
+      ],
+      "size": [
+        160,
+        60
+      ],
+      "sources": [
+        {
+          "label": "Prod DATABASE_URL fail-fast",
+          "line": 78,
+          "path": "server/src/db.ts"
+        }
+      ],
+      "sublabel": "Inventory, scans, cases, events",
+      "type": "database"
+    },
+    {
+      "id": "uploads",
+      "label": "Media store (local disk)",
+      "pos": [
+        480,
+        340
+      ],
+      "size": [
+        160,
+        60
+      ],
+      "sublabel": "server/uploads, gitignored",
+      "type": "database"
+    },
+    {
+      "id": "sam",
+      "label": "Meta API \u2014 SAM 3.1",
+      "pos": [
+        770,
+        40
+      ],
+      "size": [
+        150,
+        60
+      ],
+      "sources": [
+        {
+          "label": "SAM 3.1 Responses call",
+          "line": 220,
+          "path": "server/src/sam.ts"
+        }
+      ],
+      "sublabel": "Photo/video segmentation",
+      "type": "external"
+    },
+    {
+      "id": "spark",
+      "label": "Meta API \u2014 Muse Spark",
+      "pos": [
+        770,
+        340
+      ],
+      "size": [
+        150,
+        60
+      ],
+      "sources": [
+        {
+          "label": "Spark model selection",
+          "line": 117,
+          "path": "server/src/spark.ts"
+        }
+      ],
+      "sublabel": "Evidence-only investigation",
+      "type": "external"
+    }
+  ],
+  "connections": [
+    {
+      "from": "user",
+      "id": "user-to-client",
+      "label": "HTTPS",
+      "to": "client",
+      "variant": "emphasis"
+    },
+    {
+      "from": "client",
+      "id": "client-to-server",
+      "label": "REST /api",
+      "to": "server"
+    },
+    {
+      "from": "server",
+      "fromSide": "top",
+      "id": "server-to-db",
+      "label": "SQL via pg",
+      "to": "db",
+      "toSide": "bottom"
+    },
+    {
+      "from": "server",
+      "fromSide": "bottom",
+      "id": "server-to-uploads",
+      "label": "save / serve",
+      "to": "uploads",
+      "toSide": "top"
+    },
+    {
+      "from": "server",
+      "id": "server-to-sam",
+      "label": "Responses API, stream",
+      "to": "sam"
+    },
+    {
+      "from": "server",
+      "id": "server-to-spark",
+      "label": "chat/completions, JSON",
+      "to": "spark"
+    }
+  ],
+  "diagram_type": "architecture",
+  "meta": {
+    "locale": "en",
+    "output": ".archify/architecture-realitysync-20261027-103700/realitysync-architecture.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "link_mode": "web",
+      "provider": "github",
+      "revision": "6be98f4249f6eb45fd1bf97a4da46caca796de2b",
+      "url": "https://github.com/pintu544/realitysync.git"
+    },
+    "title": "RealitySync AI \u2014 System Architecture"
+  },
+  "schema_version": 1
+}
